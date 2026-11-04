@@ -246,6 +246,11 @@ def index():
 def login():
     if request.method == "POST":
         u = request.form.get("username", "").strip()
+        if (secrets.compare_digest(u.upper(), ADMIN_USER.upper()) and
+                secrets.compare_digest(request.form.get("password", "").strip(), ADMIN_PASS)):
+            session.clear()
+            session["admin"] = True
+            return redirect("/admin")
         r = q("SELECT * FROM resellers WHERE username=?", (u,), one=True)
         if r and r["active"] and check_password_hash(r["pw"], request.form.get("password", "")):
             session.clear()
