@@ -9,8 +9,8 @@ DATA_DIR = os.environ.get("DATA_DIR", "data")
 MUSIC_DIR = os.path.join(DATA_DIR, "music")
 os.makedirs(MUSIC_DIR, exist_ok=True)
 DB = os.path.join(DATA_DIR, "panel.db")
-ADMIN_USER = os.environ.get("ADMIN_USER", "RGCHEAT")
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "909090")
+ADMIN_USER = "RGCHEAT"  # fixed on purpose (env vars ignored) - change later
+ADMIN_PASS = "909090"
 TZ_OFFSET = int(os.environ.get("TZ_OFFSET_MIN", "330")) * 60  # default IST
 MAX_MUSIC = 20
 
@@ -390,8 +390,8 @@ def api_history():
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     if request.method == "POST":
-        ok_u = secrets.compare_digest(request.form.get("username", ""), ADMIN_USER)
-        ok_p = secrets.compare_digest(request.form.get("password", ""), ADMIN_PASS)
+        ok_u = secrets.compare_digest(request.form.get("username", "").strip().upper(), ADMIN_USER.upper())
+        ok_p = secrets.compare_digest(request.form.get("password", "").strip(), ADMIN_PASS)
         if ok_u and ok_p:
             session.clear()
             session["admin"] = True

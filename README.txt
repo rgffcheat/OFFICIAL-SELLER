@@ -8,8 +8,7 @@ RENDER DEPLOY
 Keep-alive: automatic (uses RENDER_EXTERNAL_URL, pings /health every 10 min).
 
 ADMIN LOGIN
-Set ADMIN_USER and ADMIN_PASS in Render > Environment (recommended; use a strong password).
-If not set, the defaults in app.py are used.
+Admin login is fixed in app.py (ADMIN_USER / ADMIN_PASS at the top). Change it there when ready.
 
 KEYS PER PLAN (Admin > Products)
 - Manual keys : add keys (one per line) with the "Keys" button; view / edit / delete them there.
