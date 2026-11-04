@@ -13,6 +13,8 @@ ADMIN_USER = "RGCHEAT"  # fixed on purpose (env vars ignored) - change later
 ADMIN_PASS = "909090"
 TZ_OFFSET = int(os.environ.get("TZ_OFFSET_MIN", "330")) * 60  # default IST
 MAX_MUSIC = 20
+BRAND = "RG CHEAT"      # name shown on login + panel header
+CURRENCY = "$"         # symbol shown before money amounts (change to "₹" etc.)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-" + ADMIN_PASS)
@@ -87,6 +89,19 @@ def fmt(ts):
 
 app.jinja_env.filters["dt"] = fmt
 app.jinja_env.filters["money"] = lambda v: ("%.2f" % float(v)).rstrip("0").rstrip(".") if v is not None else "0"
+
+
+def _cur(v):
+    return CURRENCY + app.jinja_env.filters["money"](v)
+
+
+app.jinja_env.filters["cur"] = _cur
+app.jinja_env.globals.update(BRAND=BRAND, year=time.gmtime().tm_year)
+
+
+def plan_label(days):
+    days = max(int(days), 1)
+    return "%d Day%s" % (days, "" if days == 1 else "s")
 
 
 def price_for(rid, plan):
@@ -270,16 +285,21 @@ def logout():
 @app.route("/dashboard")
 @reseller_required
 def dashboard():
+    import calendar
     rid, now = request.r["id"], int(time.time())
+    lt = time.gmtime(now + TZ_OFFSET)
     midnight = now - ((now + TZ_OFFSET) % 86400)
-    s = lambda sql, *a: q(sql, a, one=True)[0]
+    week_start = midnight - lt.tm_wday * 86400          # Monday 00:00 (local)
+    month_start = calendar.timegm((lt.tm_year, lt.tm_mon, 1, 0, 0, 0)) - TZ_OFFSET
+    cnt = lambda since: q("SELECT COUNT(*) FROM license_keys WHERE reseller_id=? AND created>=?", (rid, since), one=True)[0]
     stats = dict(
-        total=s("SELECT COUNT(*) FROM license_keys WHERE reseller_id=?", rid),
-        today=s("SELECT COUNT(*) FROM license_keys WHERE reseller_id=? AND created>=?", rid, midnight),
-        active=s("SELECT COUNT(*) FROM license_keys WHERE reseller_id=? AND expires>?", rid, now),
-        expired=s("SELECT COUNT(*) FROM license_keys WHERE reseller_id=? AND expires<=?", rid, now),
-        spent=q("SELECT COALESCE(SUM(price),0) FROM license_keys WHERE reseller_id=?", (rid,), one=True)[0])
-    return render_template("dashboard.html", r=request.r, st=stats, page="dashboard")
+        today=cnt(midnight), week=cnt(week_start), month=cnt(month_start), total=cnt(0),
+        month_spent=q("SELECT COALESCE(SUM(price),0) FROM license_keys WHERE reseller_id=? AND created>=?",
+                      (rid, month_start), one=True)[0],
+        products=q("SELECT COUNT(*) FROM products", one=True)[0],
+        month_name=time.strftime("%B %Y", lt))
+    recent = q("SELECT * FROM license_keys WHERE reseller_id=? ORDER BY id DESC LIMIT 5", (rid,))
+    return render_template("dashboard.html", r=request.r, st=stats, recent=recent, page="dashboard")
 
 
 @app.route("/generate", methods=["GET", "POST"])
@@ -433,17 +453,17 @@ def admin_products():
             q("INSERT INTO products(name) VALUES(?)", (request.form["name"].strip(),), commit=True)
         elif a == "plan":
             try:
+                days = max(int(num(request.form.get("days"), 1)), 1)
                 q("INSERT INTO plans(product_id,name,days,price,mode) VALUES(?,?,?,?,?)",
-                  (int(request.form["product_id"]), request.form["name"].strip(),
-                   int(num(request.form.get("days"), 1)), num(request.form.get("price")),
-                   request.form.get("mode", "stock")), commit=True)
+                  (int(request.form["product_id"]), plan_label(days), days,
+                   num(request.form.get("price")), request.form.get("mode", "stock")), commit=True)
             except Exception as e:
                 flash("Error: %s" % e, "err")
         elif a == "edit_plan":
+            days = max(int(num(request.form.get("days"), 1)), 1)
             q("UPDATE plans SET name=?, days=?, price=?, mode=? WHERE id=?",
-              (request.form["name"].strip(), int(num(request.form.get("days"), 1)),
-               num(request.form.get("price")), request.form.get("mode", "stock"),
-               int(request.form["plan_id"])), commit=True)
+              (plan_label(days), days, num(request.form.get("price")),
+               request.form.get("mode", "stock"), int(request.form["plan_id"])), commit=True)
         elif a == "del_plan":
             q("DELETE FROM plans WHERE id=?", (int(request.form["plan_id"]),), commit=True)
         elif a == "del_product":
@@ -614,7 +634,8 @@ def keep_alive():
 
 threading.Thread(target=keep_alive, daemon=True, name="keep-alive").start()
 
-from templates_ui import TEMPLATES  # noqa: E402
+from templates_ui import TEMPLATES, ic  # noqa: E402
+app.jinja_env.globals["ic"] = ic
 app.jinja_env.loader = DictLoader(TEMPLATES)
 
 if __name__ == "__main__":
