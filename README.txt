@@ -14,3 +14,11 @@ KEYS PER PLAN (Admin > Products)
 - Manual keys : add keys (one per line) with the "Keys" button; view / edit / delete them there.
 - External API: "API" button -> URL, method, headers, body, key location in response.
 - Auto-generate: random key (old behaviour).
+
+---- v4 ----
+LOGIN: one login page (/login, /admin/login both work). Admin credentials -> Admin panel. Reseller credentials -> Reseller panel.
+MAIN API: Admin > Main API  -> paste Base URL + API Token -> "Save & Connect" (shows Connected + balance). "Check Balance" refreshes it.
+ALL PRODUCTS: Admin > Main API > All Products -> select (or Import ALL). Plans + INR prices are created automatically.
+  Optional markup %. Edit selling prices any time in Admin > Products. Purchases are bought live from the main API.
+BACKUP: Admin > Backup -> Download Backup (json, goes to Downloads). Upload it again to restore everything.
+  IMPORTANT: Render free disk is wiped on every redeploy/restart -> download a backup after changes, restore after redeploy.

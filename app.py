@@ -1,6 +1,7 @@
 import os, re, json, sqlite3, secrets, time, threading
+import requests
 from flask import (Flask, request, session, redirect, render_template, flash,
-                   jsonify, send_from_directory, abort)
+                   jsonify, send_from_directory, abort, Response)
 from jinja2 import DictLoader
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -14,7 +15,8 @@ ADMIN_PASS = "909090"
 TZ_OFFSET = int(os.environ.get("TZ_OFFSET_MIN", "330")) * 60  # default IST
 MAX_MUSIC = 20
 BRAND = "RG CHEAT"      # name shown on login + panel header
-CURRENCY = "$"         # symbol shown before money amounts (change to "₹" etc.)
+CURRENCY = "₹"         # symbol shown before money amounts (all prices are INR)
+DEFAULT_API_BASE = "https://adminshops.com/api/v1"   # main provider API (editable in Admin > Main API)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-" + ADMIN_PASS)
@@ -64,11 +66,13 @@ def init_db():
     CREATE TABLE IF NOT EXISTS stock(id INTEGER PRIMARY KEY,
       plan_id INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
       key TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, used_by TEXT, used_at INTEGER, created INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
     """)
     cols = [r[1] for r in c.execute("PRAGMA table_info(plans)")]
     for col, ddl in (("mode", "TEXT DEFAULT 'random'"), ("ext_url", "TEXT DEFAULT ''"),
                      ("ext_method", "TEXT DEFAULT 'POST'"), ("ext_headers", "TEXT DEFAULT ''"),
-                     ("ext_body", "TEXT DEFAULT ''"), ("ext_path", "TEXT DEFAULT ''")):
+                     ("ext_body", "TEXT DEFAULT ''"), ("ext_path", "TEXT DEFAULT ''"),
+                     ("prov_pid", "INTEGER")):
         if col not in cols:
             c.execute("ALTER TABLE plans ADD COLUMN %s %s" % (col, ddl))
     c.commit()
@@ -107,6 +111,106 @@ def plan_label(days):
 def price_for(rid, plan):
     cp = q("SELECT price FROM custom_prices WHERE reseller_id=? AND plan_id=?", (rid, plan["id"]), one=True)
     return (cp["price"], True) if cp else (plan["price"], False)
+
+
+
+def get_setting(k, default=""):
+    r = q("SELECT v FROM settings WHERE k=?", (k,), one=True)
+    return r["v"] if r and r["v"] is not None else default
+
+
+def set_setting(k, v):
+    q("INSERT OR REPLACE INTO settings(k,v) VALUES(?,?)", (k, v), commit=True)
+
+
+def same(a, b):
+    """constant-time compare that never crashes on non-ASCII text"""
+    return secrets.compare_digest(str(a).encode("utf-8"), str(b).encode("utf-8"))
+
+
+# ---- main provider API (adminshops style: Bearer token, {"ok":..,"data":..})
+def prov_call(method, path, payload=None):
+    base = (get_setting("api_base") or DEFAULT_API_BASE).rstrip("/")
+    tok = get_setting("api_token")
+    if not tok:
+        raise ValueError("API token not set (Admin > Main API)")
+    r = requests.request(method, base + path, headers={"Authorization": "Bearer " + tok},
+                         json=payload, timeout=25)
+    try:
+        j = r.json()
+    except ValueError:
+        raise ValueError("Provider HTTP %s (not JSON)" % r.status_code)
+    if not isinstance(j, dict) or not j.get("ok"):
+        err = j.get("error") if isinstance(j, dict) else None
+        msg = err.get("message") if isinstance(err, dict) else err
+        raise ValueError(str(msg or "Provider HTTP %s" % r.status_code)[:150])
+    return j.get("data") or {}
+
+
+def prov_generate(pid, idem):
+    """Buy ONE key. Network failures are retried once with the SAME idempotency key (never double-charges)."""
+    for _ in range(2):
+        try:
+            d = prov_call("POST", "/generate", {"product_id": int(pid), "quantity": 1, "idempotency_key": idem})
+        except (requests.Timeout, requests.ConnectionError):
+            continue
+        keys = d.get("keys") or []
+        if not keys:
+            raise ValueError("Provider returned no key")
+        return str(keys[0])
+    raise ValueError("Provider not reachable")
+
+
+def prov_status():
+    """Test the connection (GET /balance) and remember the result."""
+    try:
+        d = prov_call("GET", "/balance")
+        st = dict(ok=True, balance=float(d.get("balance", 0)), balance_usd=d.get("balance_usd"),
+                  currency=d.get("currency", "INR"))
+    except Exception as e:
+        st = dict(ok=False, msg=str(e)[:150])
+    st["ts"] = int(time.time())
+    set_setting("api_status", json.dumps(st))
+    return st
+
+
+def load_catalog(refresh=False):
+    if not refresh:
+        try:
+            return json.loads(get_setting("catalog_cache"))
+        except ValueError:
+            pass
+    d = prov_call("GET", "/catalog")
+    obj = dict(ts=int(time.time()), currency=d.get("currency", "INR"), usd_rate=d.get("usd_rate") or 50,
+               products=d.get("products") or [])
+    set_setting("catalog_cache", json.dumps(obj))
+    return obj
+
+
+def inr_of(p, cat):
+    """Price of a catalog row in INR (uses USD x rate if the catalog is not INR)."""
+    if str(cat.get("currency", "INR")).upper() == "INR" and p.get("price") is not None:
+        return float(p["price"])
+    return float(p.get("price_usd") or 0) * float(cat.get("usd_rate") or 50)
+
+
+def parse_days(text):
+    s = (text or "").lower()
+    if "life" in s:
+        return 3650
+    m = re.search(r"(\d+)\s*(hour|hr|h\b|day|d\b|week|w\b|month|mo|year|yr|y\b)?", s)
+    if not m:
+        return 1
+    n, u = int(m.group(1)), (m.group(2) or "day")
+    if u.startswith("h"):
+        return max(1, -(-n // 24))
+    if u.startswith("w"):
+        return max(1, n * 7)
+    if u.startswith("mo"):
+        return max(1, n * 30)
+    if u.startswith("y"):
+        return max(1, n * 365)
+    return max(1, n)
 
 
 def catalog(rid):
@@ -175,6 +279,8 @@ def buy(rid, plan_id, via="panel"):
             raise ValueError("Insufficient balance")
         now = int(time.time())
         mode, key = (pl["mode"] or "random"), None
+        if mode == "provider" and not pl["prov_pid"]:
+            raise ValueError("Plan is not linked to the main API")
         if mode == "stock":
             row = c.execute("SELECT * FROM stock WHERE plan_id=? AND used=0 ORDER BY id LIMIT 1", (plan_id,)).fetchone()
             if not row:
@@ -198,9 +304,12 @@ def buy(rid, plan_id, via="panel"):
             pass
         c.close()
         raise
-    if mode == "api":  # balance already reserved; refund if the provider fails
+    if mode in ("api", "provider"):  # balance already reserved; refund if the provider fails
         try:
-            key = fetch_external(pl)
+            if mode == "provider":
+                key = prov_generate(pl["prov_pid"], "rp-%d-%d-%s" % (rid, now, secrets.token_hex(4)))
+            else:
+                key = fetch_external(pl)
         except Exception as e:
             c.execute("UPDATE resellers SET balance=balance+? WHERE id=?", (price, rid))
             c.close()
@@ -254,25 +363,35 @@ def health():
 
 @app.route("/")
 def index():
-    return redirect("/dashboard" if session.get("rid") else "/login")
+    return redirect("/admin" if session.get("admin") else "/dashboard" if session.get("rid") else "/login")
+
+
+def do_login():
+    """ONE login for everybody: admin credentials -> admin panel, reseller credentials -> reseller panel."""
+    if request.method == "POST":
+        u = request.form.get("username", "").strip()
+        raw = request.form.get("password", "")
+        pw = raw.strip()
+        if same(u.upper(), ADMIN_USER.upper()) and same(pw, ADMIN_PASS):
+            session.clear()
+            session["admin"] = True
+            return redirect("/admin")
+        for r in q("SELECT * FROM resellers WHERE lower(username)=lower(?)", (u,)):
+            if check_password_hash(r["pw"], raw) or check_password_hash(r["pw"], pw):
+                if not r["active"]:
+                    flash("Your account is disabled. Please contact admin.", "err")
+                    break
+                session.clear()
+                session["rid"] = r["id"]
+                return redirect("/dashboard")
+        else:
+            flash("Invalid username or password", "err")
+    return render_template("login.html", title="Login", action=request.path)
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    if request.method == "POST":
-        u = request.form.get("username", "").strip()
-        if (secrets.compare_digest(u.upper(), ADMIN_USER.upper()) and
-                secrets.compare_digest(request.form.get("password", "").strip(), ADMIN_PASS)):
-            session.clear()
-            session["admin"] = True
-            return redirect("/admin")
-        r = q("SELECT * FROM resellers WHERE username=?", (u,), one=True)
-        if r and r["active"] and check_password_hash(r["pw"], request.form.get("password", "")):
-            session.clear()
-            session["rid"] = r["id"]
-            return redirect("/dashboard")
-        flash("Invalid username/password or account disabled", "err")
-    return render_template("login.html", title="Reseller Login", action="/login")
+    return do_login()
 
 
 @app.route("/logout")
@@ -414,15 +533,7 @@ def api_history():
 # ---------------------------------------------------------------- admin
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
-    if request.method == "POST":
-        ok_u = secrets.compare_digest(request.form.get("username", "").strip().upper(), ADMIN_USER.upper())
-        ok_p = secrets.compare_digest(request.form.get("password", "").strip(), ADMIN_PASS)
-        if ok_u and ok_p:
-            session.clear()
-            session["admin"] = True
-            return redirect("/admin")
-        flash("Wrong admin username/password", "err")
-    return render_template("login.html", title="Admin Login", action="/admin/login")
+    return do_login()
 
 
 @app.route("/admin/logout")
@@ -461,9 +572,15 @@ def admin_products():
                 flash("Error: %s" % e, "err")
         elif a == "edit_plan":
             days = max(int(num(request.form.get("days"), 1)), 1)
-            q("UPDATE plans SET name=?, days=?, price=?, mode=? WHERE id=?",
-              (plan_label(days), days, num(request.form.get("price")),
-               request.form.get("mode", "stock"), int(request.form["plan_id"])), commit=True)
+            plid = int(request.form["plan_id"])
+            old = q("SELECT days,name,prov_pid FROM plans WHERE id=?", (plid,), one=True)
+            mode = request.form.get("mode", "stock")
+            if old and mode == "provider" and not old["prov_pid"]:
+                flash("This plan is not linked to the main API", "err")
+            elif old:
+                name = old["name"] if old["days"] == days else plan_label(days)
+                q("UPDATE plans SET name=?, days=?, price=?, mode=? WHERE id=?",
+                  (name, days, num(request.form.get("price")), mode, plid), commit=True)
         elif a == "del_plan":
             q("DELETE FROM plans WHERE id=?", (int(request.form["plan_id"]),), commit=True)
         elif a == "del_product":
@@ -537,9 +654,13 @@ def admin_keys():
 @admin_required
 def admin_resellers():
     if request.method == "POST":
-        u, p = request.form.get("username", "").strip(), request.form.get("password", "")
+        u, p = request.form.get("username", "").strip(), request.form.get("password", "").strip()
         if not u or not p:
             flash("Username and password required", "err")
+        elif same(u.upper(), ADMIN_USER.upper()):
+            flash("This username is reserved for the admin", "err")
+        elif q("SELECT 1 FROM resellers WHERE lower(username)=lower(?)", (u,), one=True):
+            flash("Username already exists", "err")
         else:
             try:
                 q("INSERT INTO resellers(username,pw,balance,api_key,created) VALUES(?,?,?,?,?)",
@@ -562,8 +683,8 @@ def admin_reseller(rid):
         if a == "credit":
             q("UPDATE resellers SET balance=balance+? WHERE id=?", (num(request.form.get("amount")), rid), commit=True)
             flash("Credit updated (use negative number to deduct)", "ok")
-        elif a == "password" and request.form.get("password"):
-            q("UPDATE resellers SET pw=? WHERE id=?", (generate_password_hash(request.form["password"]), rid), commit=True)
+        elif a == "password" and request.form.get("password", "").strip():
+            q("UPDATE resellers SET pw=? WHERE id=?", (generate_password_hash(request.form["password"].strip()), rid), commit=True)
             flash("Password changed", "ok")
         elif a == "toggle":
             q("UPDATE resellers SET active=1-active WHERE id=?", (rid,), commit=True)
@@ -615,6 +736,172 @@ def admin_music():
                 flash("Upload a file or paste a direct audio URL", "err")
         return redirect("/admin/music")
     return render_template("admin_music.html", rows=q("SELECT * FROM music ORDER BY id"), mx=MAX_MUSIC, page="music")
+
+
+# ---------------------------------------------------------------- admin: main API
+@app.route("/admin/main-api", methods=["GET", "POST"])
+@admin_required
+def admin_main_api():
+    if request.method == "POST":
+        a = request.form.get("action")
+        if a == "save":
+            base = request.form.get("base", "").strip().rstrip("/")
+            tok = request.form.get("token", "").strip()
+            if not re.match(r"^https?://", base):
+                flash("Base URL must start with http:// or https://", "err")
+                return redirect("/admin/main-api")
+            set_setting("api_base", base)
+            if tok:
+                set_setting("api_token", tok)
+        st = prov_status()
+        if st["ok"]:
+            flash("Connected successfully. Balance: %s" % _cur(st["balance"]), "ok")
+        else:
+            flash("Connection failed: %s" % st["msg"], "err")
+        return redirect("/admin/main-api")
+    try:
+        st = json.loads(get_setting("api_status"))
+    except ValueError:
+        st = None
+    tok = get_setting("api_token")
+    return render_template("admin_mapi.html", base=get_setting("api_base") or DEFAULT_API_BASE,
+                           tail=tok[-4:] if tok else "", st=st, page="mapi")
+
+
+@app.route("/admin/main-api/products", methods=["GET", "POST"])
+@admin_required
+def admin_main_api_products():
+    if request.method == "POST":
+        try:
+            cat = load_catalog()
+        except Exception as e:
+            flash("Could not load catalog: %s" % e, "err")
+            return redirect("/admin/main-api/products")
+        rows = {int(p["product_id"]): p for p in cat["products"] if str(p.get("product_id", "")).isdigit()}
+        if request.form.get("scope") == "all":
+            ids = list(rows)
+        else:
+            ids = [int(x) for x in request.form.getlist("pid") if x.isdigit() and int(x) in rows]
+        markup = max(num(request.form.get("markup")), 0.0)
+        overwrite = bool(request.form.get("overwrite"))
+        new_pl = upd = skip = new_pr = 0
+        for pid in ids:
+            p = rows[pid]
+            price = round(inr_of(p, cat) * (1 + markup / 100.0), 2)
+            ex = q("SELECT id FROM plans WHERE prov_pid=?", (pid,), one=True)
+            if ex:
+                if overwrite:
+                    q("UPDATE plans SET price=? WHERE id=?", (price, ex["id"]), commit=True)
+                    upd += 1
+                else:
+                    skip += 1
+                continue
+            pname = (p.get("product_name") or "Product %s" % pid).strip()
+            pr = q("SELECT id FROM products WHERE lower(name)=lower(?)", (pname,), one=True)
+            if pr:
+                prid = pr["id"]
+            else:
+                prid = q("INSERT INTO products(name) VALUES(?)", (pname,), commit=True)
+                new_pr += 1
+            dur = str(p.get("duration") or "1 Day").strip()
+            q("INSERT INTO plans(product_id,name,days,price,mode,prov_pid) VALUES(?,?,?,?,?,?)",
+              (prid, dur, parse_days(dur), price, "provider", pid), commit=True)
+            new_pl += 1
+        flash("Imported %d plan(s), %d new product(s). Updated prices: %d. Skipped (already there): %d."
+              % (new_pl, new_pr, upd, skip), "ok")
+        return redirect("/admin/main-api/products")
+    cat, err = None, None
+    try:
+        cat = load_catalog(refresh=bool(request.args.get("refresh")))
+    except Exception as e:
+        err = str(e)
+        try:
+            cat = json.loads(get_setting("catalog_cache"))
+        except ValueError:
+            cat = None
+    if err:
+        flash("Could not load catalog: %s" % err, "err")
+    mine = {r["prov_pid"]: r["price"] for r in q("SELECT prov_pid, price FROM plans WHERE prov_pid IS NOT NULL")}
+    groups, idx = [], {}
+    for p in (cat or {}).get("products", []):
+        try:
+            pid = int(p["product_id"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        name = (p.get("product_name") or "Product").strip()
+        if name not in idx:
+            idx[name] = dict(name=name, plans=[])
+            groups.append(idx[name])
+        idx[name]["plans"].append(dict(pid=pid, dur=p.get("duration") or "", inr=inr_of(p, cat),
+                                       usd=p.get("price_usd"), mine=mine.get(pid)))
+    return render_template("admin_mapi_products.html", groups=groups, cat=cat, page="mapi")
+
+
+# ---------------------------------------------------------------- admin: backup / restore
+BACKUP_TABLES = ["products", "plans", "resellers", "custom_prices", "license_keys", "music", "stock", "settings"]
+
+
+@app.route("/admin/backup")
+@admin_required
+def admin_backup():
+    counts = {t: q("SELECT COUNT(*) FROM %s" % t, one=True)[0] for t in BACKUP_TABLES}
+    return render_template("admin_backup.html", counts=counts, page="backup")
+
+
+@app.route("/admin/backup/download")
+@admin_required
+def admin_backup_download():
+    out = dict(app="reseller-panel", version=1, created=int(time.time()), tables={})
+    for t in BACKUP_TABLES:
+        out["tables"][t] = [dict(r) for r in q("SELECT * FROM %s" % t)]
+    name = "backup_%s.json" % time.strftime("%Y%m%d_%H%M", time.gmtime(time.time() + TZ_OFFSET))
+    return Response(json.dumps(out, ensure_ascii=False), mimetype="application/json",
+                    headers={"Content-Disposition": 'attachment; filename="%s"' % name,
+                             "Cache-Control": "no-store"})
+
+
+@app.route("/admin/backup/restore", methods=["POST"])
+@admin_required
+def admin_backup_restore():
+    f = request.files.get("file")
+    try:
+        data = json.loads(f.read().decode("utf-8")) if f and f.filename else None
+        if not isinstance(data, dict) or data.get("app") != "reseller-panel" or not isinstance(data.get("tables"), dict):
+            raise ValueError("This is not a backup file of this panel")
+        tables = data["tables"]
+    except (ValueError, UnicodeDecodeError) as e:
+        flash("Restore failed: %s" % (e if isinstance(e, ValueError) and "backup" in str(e) else "invalid file"), "err")
+        return redirect("/admin/backup")
+    c = sqlite3.connect(DB, timeout=20, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=OFF")
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        for t in reversed(BACKUP_TABLES):
+            c.execute("DELETE FROM %s" % t)
+        total = 0
+        for t in BACKUP_TABLES:          # table names come from the fixed list above
+            cols = [r[1] for r in c.execute("PRAGMA table_info(%s)" % t)]
+            for row in tables.get(t) or []:
+                keys = [k for k in row if k in cols]      # only known column names are ever used
+                if not keys:
+                    continue
+                vals = [row[k] for k in keys]
+                if any(isinstance(v, (dict, list)) for v in vals):
+                    raise ValueError("bad value in table %s" % t)
+                c.execute("INSERT INTO %s(%s) VALUES(%s)" % (t, ",".join(keys), ",".join("?" * len(keys))), vals)
+                total += 1
+        c.execute("COMMIT")
+        flash("Backup restored (%d records). Everything is back." % total, "ok")
+    except Exception as e:
+        try:
+            c.execute("ROLLBACK")
+        except Exception:
+            pass
+        flash("Restore failed, nothing was changed: %s" % str(e)[:120], "err")
+    finally:
+        c.close()
+    return redirect("/admin/backup")
 
 
 # ---------------------------------------------------------------- keep-alive (Render never sleeps)

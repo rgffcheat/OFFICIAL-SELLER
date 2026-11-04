@@ -255,7 +255,7 @@ print(r.get("key"))</pre></div>{% endblock %}"""
 
 T["abase.html"] = HEAD + """Admin</title><style>""" + CSS + """</style></head><body>
 <div class=nav><b class=logo style="padding:7px 10px;display:inline-flex;align-items:center;gap:8px">{{ic('tool')}} ADMIN</b><a href="/admin" class="{{'on' if page=='home'}}">Home</a><a href="/admin/products" class="{{'on' if page=='products'}}">Products</a>
-<a href="/admin/keys" class="{{'on' if page=='keys'}}">Sold Keys</a><a href="/admin/resellers" class="{{'on' if page=='resellers'}}">Resellers</a><a href="/admin/music" class="{{'on' if page=='music'}}">Music</a><a href="/admin/logout" style="margin-left:auto">Logout</a></div>
+<a href="/admin/keys" class="{{'on' if page=='keys'}}">Sold Keys</a><a href="/admin/resellers" class="{{'on' if page=='resellers'}}">Resellers</a><a href="/admin/main-api" class="{{'on' if page=='mapi'}}">Main API</a><a href="/admin/backup" class="{{'on' if page=='backup'}}">Backup</a><a href="/admin/music" class="{{'on' if page=='music'}}">Music</a><a href="/admin/logout" style="margin-left:auto">Logout</a></div>
 <div class=wrap>""" + FLASH + """{% block c %}{% endblock %}</div></body></html>"""
 
 T["admin_home.html"] = """{% extends 'abase.html' %}{% block c %}<h2>Overview</h2><div class=grid>
@@ -279,14 +279,14 @@ T["admin_products.html"] = """{% extends 'abase.html' %}{% block c %}<h2>Product
 {% for e in x.plans %}{% set pl=e.pl %}<tr><form method=post><input type=hidden name=action value=edit_plan><input type=hidden name=plan_id value="{{pl.id}}">
 <td>{{pl.id}}</td><td><input name=days type=number value="{{pl.days}}" style="width:65px"></td>
 <td><input name=price type=number step=any value="{{pl.price}}" style="width:90px"></td>
-<td><select name=mode>{% for v,l in [('stock','Manual keys'),('api','External API'),('random','Auto-generate')] %}<option value="{{v}}" {{'selected' if (pl.mode or 'random')==v}}>{{l}}</option>{% endfor %}</select></td>
+<td><select name=mode>{% for v,l in [('stock','Manual keys'),('api','External API'),('random','Auto-generate')] %}<option value="{{v}}" {{'selected' if (pl.mode or 'random')==v}}>{{l}}</option>{% endfor %}{% if pl.prov_pid %}<option value="provider" {{'selected' if pl.mode=='provider'}}>Main API #{{pl.prov_pid}}</option>{% endif %}</select></td>
 <td style="white-space:nowrap"><button class=g>Save</button></form>
-{% if (pl.mode or 'random')=='stock' %}<a class=btn href="/admin/stock/{{pl.id}}" style="padding:8px 12px">{{ic('key',16)}}Keys <span class="pill c">{{e.stock}}</span></a>{% elif pl.mode=='api' %}<a class=btn href="/admin/plan-api/{{pl.id}}" style="padding:8px 12px">{{ic('code',16)}}API</a>{% endif %}
+{% if (pl.mode or 'random')=='stock' %}<a class=btn href="/admin/stock/{{pl.id}}" style="padding:8px 12px">{{ic('key',16)}}Keys <span class="pill c">{{e.stock}}</span></a>{% elif pl.mode=='api' %}<a class=btn href="/admin/plan-api/{{pl.id}}" style="padding:8px 12px">{{ic('code',16)}}API</a>{% elif pl.mode=='provider' %}<span class="pill c">Main API #{{pl.prov_pid}}</span>{% endif %}
 <form method=post style="display:inline" onsubmit="return confirm('Delete plan?')"><input type=hidden name=action value=del_plan><input type=hidden name=plan_id value="{{pl.id}}"><button class=r>{{ic('x',16)}}</button></form></td></tr>
 {% else %}<tr><td colspan=5>No plans</td></tr>{% endfor %}</table></div></div>{% endfor %}{% endblock %}"""
 
 T["admin_stock.html"] = """{% extends 'abase.html' %}{% block c %}<a href="/admin/products">{{ic('back',16)}} Back</a><h2>{{ic('key',24)}} {{pl.pname}} — {{pl.name}}</h2>
-<div class=mu>Key source: <span class="pill p">{{ {'stock':'Manual keys','api':'External API','random':'Auto-generate'}[pl.mode or 'random'] }}</span> (change it on the Products page; keys below are used only in "Manual keys" mode)</div>
+<div class=mu>Key source: <span class="pill p">{{ {'stock':'Manual keys','api':'External API','random':'Auto-generate','provider':'Main API'}[pl.mode or 'random'] }}</span> (change it on the Products page; keys below are used only in "Manual keys" mode)</div>
 <div class=card><h3>Add Keys</h3><form method=post><input type=hidden name=action value=add><textarea name=keys placeholder="One key per line" required></textarea><button class=g style="margin-top:8px">{{ic('plus')}} Add Keys</button></form></div>
 <div class="card tw"><div style="display:flex;justify-content:space-between;align-items:center"><h3>All Keys ({{rows|length}})</h3>
 <form method=post onsubmit="return confirm('Remove all used keys?')"><input type=hidden name=action value=clear_used><button class="r">Clear used</button></form></div>
@@ -337,5 +337,63 @@ T["admin_music.html"] = """{% extends 'abase.html' %}{% block c %}<h2>{{ic('musi
 <div class="card tw"><table>{% for m in rows %}<tr><td>{{loop.index}}</td><td>{{m.title}}</td><td><audio controls preload=none src="{{m.url}}" style="height:32px"></audio></td>
 <td><form method=post><input type=hidden name=action value=delete><input type=hidden name=id value="{{m.id}}"><button class=r>Delete</button></form></td></tr>
 {% else %}<tr><td>No songs</td></tr>{% endfor %}</table></div>{% endblock %}"""
+
+SUB = """<div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 4px">
+<a class=btn href="/admin/main-api" style="{{'' if page2=='c' else 'background:transparent;border:1px solid var(--bd);box-shadow:none'}}">{{ic('key',16)}}Connection</a>
+<a class=btn href="/admin/main-api/products" style="{{'' if page2=='p' else 'background:transparent;border:1px solid var(--bd);box-shadow:none'}}">{{ic('box',16)}}All Products</a></div>"""
+
+T["admin_mapi.html"] = """{% extends 'abase.html' %}{% block c %}{% set page2='c' %}<h2>{{ic('code',24)}} Main API</h2>""" + SUB + """
+<div class=card><h3>{{ic('key',20)}} Connection</h3>
+<form method=post><input type=hidden name=action value=save>
+<p class=mu>Base URL</p><input name=base value="{{base}}" style="width:100%" required>
+<p class=mu>API Token{% if tail %} &mdash; saved (ends with <code>{{tail}}</code>). Leave empty to keep it.{% endif %}</p>
+<input name=token type=password autocomplete=off placeholder="Paste your API token" style="width:100%" {{'' if tail else 'required'}}>
+<button class=g style="margin-top:12px">{{ic('check')}} Save &amp; Connect</button></form></div>
+<div class=card><h3>{{ic('wallet',20)}} Status &amp; Balance</h3>
+{% if st %}{% if st.ok %}<span class="pill a">Connected</span>
+<div style="font-size:30px;font-weight:800;color:#34d399;margin:8px 0">{{st.balance|cur}}{% if st.balance_usd is not none %} <span class=mu>(${{st.balance_usd|money}})</span>{% endif %}</div>
+{% else %}<span class="pill e">Not connected</span><div class=mu style="margin:8px 0">{{st.msg}}</div>{% endif %}
+<div class=mu>Last checked: {{st.ts|dt}}</div>
+{% else %}<div class=mu>Not checked yet. Save your token, then press Check Balance.</div>{% endif %}
+<form method=post style="margin-top:12px"><input type=hidden name=action value=check><button>{{ic('wallet')}} Check Balance</button></form></div>
+{% endblock %}"""
+
+T["admin_mapi_products.html"] = """{% extends 'abase.html' %}{% block c %}{% set page2='p' %}<h2>{{ic('box',24)}} All Products</h2>""" + SUB + """
+{% if not cat %}<div class=card>No catalog yet. Connect the API first (Connection tab), then press Refresh.<br><br><a class=btn href="/admin/main-api/products?refresh=1">Refresh from API</a></div>
+{% else %}
+<form method=post>
+<div class=card><div class=mu>Provider rates are already in INR. Imported plans are bought automatically from the main API when a reseller purchases.</div>
+<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px">
+<label class=mu>Markup % <input name=markup type=number step=any min=0 value=0 style="width:90px"></label>
+<label class=mu><input type=checkbox name=overwrite> Also reset prices of already imported plans</label></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+<button class=g name=scope value=sel>{{ic('plus')}} Import selected</button>
+<button name=scope value=all onclick="return confirm('Import ALL products from the main API?')">{{ic('box')}} Import ALL</button>
+<a class=btn href="/admin/main-api/products?refresh=1" style="background:transparent;border:1px solid var(--bd);box-shadow:none">Refresh</a>
+<label class=mu style="margin-left:auto"><input type=checkbox id=selall> Select all</label></div>
+<div class=mu style="margin-top:8px">Catalog fetched: {{cat.ts|dt}} &middot; Edit selling prices later in <a href="/admin/products">Products</a>.</div></div>
+{% for g in groups %}<div class=card><div style="display:flex;justify-content:space-between;align-items:center"><h3>{{g.name}}</h3><label class=mu><input type=checkbox class=ga> all</label></div>
+<div class=tw><table><tr><th></th><th>Plan</th><th>ID</th><th>Cost</th><th>Status</th></tr>
+{% for p in g.plans %}<tr><td><input type=checkbox name=pid value="{{p.pid}}" class=pc></td><td>{{p.dur}}</td><td>{{p.pid}}</td>
+<td>{{p.inr|cur}}{% if p.usd is not none %} <span class=mu>${{p.usd|money}}</span>{% endif %}</td>
+<td>{% if p.mine is not none %}<span class="pill a">Imported</span> <span class=mu>your price {{p.mine|cur}}</span>{% else %}<span class="pill p">New</span>{% endif %}</td></tr>{% endfor %}</table></div></div>
+{% else %}<div class=card>The catalog is empty.</div>{% endfor %}
+</form>
+<script>
+document.querySelectorAll('.ga').forEach(g=>g.onchange=()=>g.closest('.card').querySelectorAll('.pc').forEach(c=>c.checked=g.checked));
+document.getElementById('selall').onchange=function(){document.querySelectorAll('.pc,.ga').forEach(c=>c.checked=this.checked)};
+</script>
+{% endif %}{% endblock %}"""
+
+T["admin_backup.html"] = """{% extends 'abase.html' %}{% block c %}<h2>{{ic('save',24)}} Backup &amp; Restore</h2>
+<div class=card><h3>Download Backup</h3>
+<p class=mu>One file with everything: products, plans, prices, resellers (balances &amp; passwords), keys, stock, Main API token. Keep it private.</p>
+<div class=mu>Now: {% for k,v in counts.items() %}{{k}} <b>{{v}}</b>{{ ' &middot; '|safe if not loop.last }}{% endfor %}</div>
+<a class=btn href="/admin/backup/download" style="margin-top:12px">{{ic('save')}} Download Backup</a></div>
+<div class=card><h3>Upload Backup (Restore)</h3>
+<p class=mu>Replaces ALL current data with the file. If the file is wrong, nothing changes. Uploaded music files are not inside the backup (use music URLs).</p>
+<form method=post action="/admin/backup/restore" enctype=multipart/form-data onsubmit="return confirm('This will REPLACE all current data with the backup. Continue?')">
+<input type=file name=file accept=".json,application/json" required> <button class=r>{{ic('plus')}} Upload &amp; Restore</button></form></div>
+{% endblock %}"""
 
 TEMPLATES = T
