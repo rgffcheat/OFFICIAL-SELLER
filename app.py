@@ -1,4 +1,4 @@
-import os, re, sqlite3, secrets, time, threading
+import os, re, json, sqlite3, secrets, time, threading
 from flask import (Flask, request, session, redirect, render_template, flash,
                    jsonify, send_from_directory, abort)
 from jinja2 import DictLoader
@@ -9,8 +9,8 @@ DATA_DIR = os.environ.get("DATA_DIR", "data")
 MUSIC_DIR = os.path.join(DATA_DIR, "music")
 os.makedirs(MUSIC_DIR, exist_ok=True)
 DB = os.path.join(DATA_DIR, "panel.db")
-ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "admin123")
+ADMIN_USER = os.environ.get("ADMIN_USER", "RGCHEAT")
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "909090")
 TZ_OFFSET = int(os.environ.get("TZ_OFFSET_MIN", "330")) * 60  # default IST
 MAX_MUSIC = 20
 
@@ -59,7 +59,16 @@ def init_db():
       product_name TEXT, plan_name TEXT, key TEXT NOT NULL, price REAL NOT NULL,
       created INTEGER NOT NULL, expires INTEGER NOT NULL, via TEXT DEFAULT 'panel');
     CREATE TABLE IF NOT EXISTS music(id INTEGER PRIMARY KEY, title TEXT, url TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS stock(id INTEGER PRIMARY KEY,
+      plan_id INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+      key TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, used_by TEXT, used_at INTEGER, created INTEGER NOT NULL);
     """)
+    cols = [r[1] for r in c.execute("PRAGMA table_info(plans)")]
+    for col, ddl in (("mode", "TEXT DEFAULT 'random'"), ("ext_url", "TEXT DEFAULT ''"),
+                     ("ext_method", "TEXT DEFAULT 'POST'"), ("ext_headers", "TEXT DEFAULT ''"),
+                     ("ext_body", "TEXT DEFAULT ''"), ("ext_path", "TEXT DEFAULT ''")):
+        if col not in cols:
+            c.execute("ALTER TABLE plans ADD COLUMN %s %s" % (col, ddl))
     c.commit()
     c.close()
 
@@ -91,9 +100,46 @@ def catalog(rid):
         plans = []
         for pl in q("SELECT * FROM plans WHERE product_id=? ORDER BY days, id", (p["id"],)):
             price, custom = price_for(rid, pl)
-            plans.append(dict(id=pl["id"], name=pl["name"], days=pl["days"], price=price, custom=custom))
+            sc = q("SELECT COUNT(*) FROM stock WHERE plan_id=? AND used=0", (pl["id"],), one=True)[0]
+            plans.append(dict(id=pl["id"], name=pl["name"], days=pl["days"], price=price, custom=custom,
+                              mode=pl["mode"] or "random", stock=sc))
         out.append(dict(id=p["id"], name=p["name"], plans=plans))
     return out
+
+
+def _dig(obj, path):
+    for part in [p for p in path.split(".") if p]:
+        obj = obj[int(part)] if isinstance(obj, list) else obj[part]
+    return obj
+
+
+def fetch_external(pl):
+    """Call the provider API configured on the plan and return the key text."""
+    import requests
+    rep = {"{days}": str(pl["days"]), "{plan}": pl["name"], "{product}": pl["pname"]}
+
+    def sub(t):
+        for k, v in rep.items():
+            t = t.replace(k, v)
+        return t
+    headers = json.loads(sub(pl["ext_headers"])) if (pl["ext_headers"] or "").strip() else {}
+    body = json.loads(sub(pl["ext_body"])) if (pl["ext_body"] or "").strip() else None
+    m = (pl["ext_method"] or "POST").upper()
+    kw = dict(headers=headers, timeout=25)
+    if m == "GET":
+        kw["params"] = body
+    else:
+        kw["json"] = body
+    r = requests.request(m, sub(pl["ext_url"]), **kw)
+    if r.status_code >= 400:
+        raise ValueError("Provider HTTP %s" % r.status_code)
+    if (pl["ext_path"] or "").strip():
+        val = _dig(r.json(), pl["ext_path"].strip())
+    else:
+        val = r.text.strip()
+    if not val:
+        raise ValueError("Provider returned no key")
+    return str(val)
 
 
 def buy(rid, plan_id, via="panel"):
@@ -113,25 +159,42 @@ def buy(rid, plan_id, via="panel"):
         if r["balance"] < price:
             raise ValueError("Insufficient balance")
         now = int(time.time())
-        pre = re.sub(r"[^A-Z0-9]", "", pl["pname"].upper())[:6] or "KEY"
-        raw = secrets.token_hex(8).upper()
-        key = pre + "-" + "-".join(raw[i:i + 4] for i in range(0, 16, 4))
+        mode, key = (pl["mode"] or "random"), None
+        if mode == "stock":
+            row = c.execute("SELECT * FROM stock WHERE plan_id=? AND used=0 ORDER BY id LIMIT 1", (plan_id,)).fetchone()
+            if not row:
+                raise ValueError("Out of stock")
+            key = row["key"]
+            c.execute("UPDATE stock SET used=1, used_by=?, used_at=? WHERE id=?", (r["username"], now, row["id"]))
+        elif mode == "random":
+            pre = re.sub(r"[^A-Z0-9]", "", pl["pname"].upper())[:6] or "KEY"
+            raw = secrets.token_hex(8).upper()
+            key = pre + "-" + "-".join(raw[i:i + 4] for i in range(0, 16, 4))
         exp = now + int(pl["days"]) * 86400
         c.execute("UPDATE resellers SET balance=balance-? WHERE id=?", (price, rid))
-        c.execute("INSERT INTO license_keys(reseller_id,product_name,plan_name,key,price,created,expires,via) "
-                  "VALUES(?,?,?,?,?,?,?,?)", (rid, pl["pname"], pl["name"], key, price, now, exp, via))
+        if key:
+            c.execute("INSERT INTO license_keys(reseller_id,product_name,plan_name,key,price,created,expires,via) "
+                      "VALUES(?,?,?,?,?,?,?,?)", (rid, pl["pname"], pl["name"], key, price, now, exp, via))
         c.execute("COMMIT")
-        bal = q("SELECT balance FROM resellers WHERE id=?", (rid,), one=True)["balance"]
-        return dict(key=key, price=price, expires=exp, balance=bal,
-                    product=pl["pname"], plan=pl["name"])
     except Exception:
         try:
             c.execute("ROLLBACK")
         except Exception:
             pass
-        raise
-    finally:
         c.close()
+        raise
+    if mode == "api":  # balance already reserved; refund if the provider fails
+        try:
+            key = fetch_external(pl)
+        except Exception as e:
+            c.execute("UPDATE resellers SET balance=balance+? WHERE id=?", (price, rid))
+            c.close()
+            raise ValueError("Provider error, balance refunded: %s" % str(e)[:120])
+        c.execute("INSERT INTO license_keys(reseller_id,product_name,plan_name,key,price,created,expires,via) "
+                  "VALUES(?,?,?,?,?,?,?,?)", (rid, pl["pname"], pl["name"], key, price, now, exp, via))
+    c.close()
+    bal = q("SELECT balance FROM resellers WHERE id=?", (rid,), one=True)["balance"]
+    return dict(key=key, price=price, expires=exp, balance=bal, product=pl["pname"], plan=pl["name"])
 
 
 def reseller_required(f):
@@ -365,23 +428,84 @@ def admin_products():
             q("INSERT INTO products(name) VALUES(?)", (request.form["name"].strip(),), commit=True)
         elif a == "plan":
             try:
-                q("INSERT INTO plans(product_id,name,days,price) VALUES(?,?,?,?)",
+                q("INSERT INTO plans(product_id,name,days,price,mode) VALUES(?,?,?,?,?)",
                   (int(request.form["product_id"]), request.form["name"].strip(),
-                   int(num(request.form.get("days"), 1)), num(request.form.get("price"))), commit=True)
+                   int(num(request.form.get("days"), 1)), num(request.form.get("price")),
+                   request.form.get("mode", "stock")), commit=True)
             except Exception as e:
                 flash("Error: %s" % e, "err")
         elif a == "edit_plan":
-            q("UPDATE plans SET name=?, days=?, price=? WHERE id=?",
+            q("UPDATE plans SET name=?, days=?, price=?, mode=? WHERE id=?",
               (request.form["name"].strip(), int(num(request.form.get("days"), 1)),
-               num(request.form.get("price")), int(request.form["plan_id"])), commit=True)
+               num(request.form.get("price")), request.form.get("mode", "stock"),
+               int(request.form["plan_id"])), commit=True)
         elif a == "del_plan":
             q("DELETE FROM plans WHERE id=?", (int(request.form["plan_id"]),), commit=True)
         elif a == "del_product":
             q("DELETE FROM products WHERE id=?", (int(request.form["product_id"]),), commit=True)
         return redirect("/admin/products")
-    prods = [dict(p=p, plans=q("SELECT * FROM plans WHERE product_id=? ORDER BY days,id", (p["id"],)))
+    prods = [dict(p=p, plans=[dict(pl=pl, stock=q("SELECT COUNT(*) FROM stock WHERE plan_id=? AND used=0", (pl["id"],), one=True)[0])
+                              for pl in q("SELECT * FROM plans WHERE product_id=? ORDER BY days,id", (p["id"],))])
              for p in q("SELECT * FROM products ORDER BY id")]
     return render_template("admin_products.html", prods=prods, page="products")
+
+
+
+@app.route("/admin/stock/<int:pid>", methods=["GET", "POST"])
+@admin_required
+def admin_stock(pid):
+    pl = q("SELECT pl.*, pr.name pname FROM plans pl JOIN products pr ON pr.id=pl.product_id WHERE pl.id=?",
+           (pid,), one=True) or abort(404)
+    if request.method == "POST":
+        a = request.form.get("action")
+        if a == "add":
+            keys = [k.strip() for k in request.form.get("keys", "").splitlines() if k.strip()]
+            now = int(time.time())
+            for k in keys:
+                q("INSERT INTO stock(plan_id,key,created) VALUES(?,?,?)", (pid, k, now), commit=True)
+            flash("%d key(s) added" % len(keys), "ok")
+        elif a == "edit":
+            q("UPDATE stock SET key=? WHERE id=? AND plan_id=? AND used=0",
+              (request.form.get("key", "").strip(), int(request.form["id"]), pid), commit=True)
+            flash("Key updated", "ok")
+        elif a == "delete":
+            q("DELETE FROM stock WHERE id=? AND plan_id=?", (int(request.form["id"]), pid), commit=True)
+            flash("Key deleted", "ok")
+        elif a == "clear_used":
+            q("DELETE FROM stock WHERE plan_id=? AND used=1", (pid,), commit=True)
+            flash("Used keys cleared", "ok")
+        return redirect("/admin/stock/%d" % pid)
+    rows = q("SELECT * FROM stock WHERE plan_id=? ORDER BY used, id DESC", (pid,))
+    return render_template("admin_stock.html", pl=pl, rows=rows, page="products")
+
+
+@app.route("/admin/plan-api/<int:pid>", methods=["GET", "POST"])
+@admin_required
+def admin_plan_api(pid):
+    pl = q("SELECT pl.*, pr.name pname FROM plans pl JOIN products pr ON pr.id=pl.product_id WHERE pl.id=?",
+           (pid,), one=True) or abort(404)
+    if request.method == "POST":
+        f = request.form
+        try:
+            for fld in ("ext_headers", "ext_body"):
+                if f.get(fld, "").strip():
+                    json.loads(f[fld].replace("{days}", "1").replace("{plan}", "x").replace("{product}", "x"))
+        except ValueError:
+            flash("Headers/Body must be valid JSON", "err")
+            return redirect("/admin/plan-api/%d" % pid)
+        q("UPDATE plans SET ext_url=?, ext_method=?, ext_headers=?, ext_body=?, ext_path=? WHERE id=?",
+          (f.get("ext_url", "").strip(), f.get("ext_method", "POST"), f.get("ext_headers", "").strip(),
+           f.get("ext_body", "").strip(), f.get("ext_path", "").strip(), pid), commit=True)
+        flash("API settings saved. Set the plan mode to 'External API' on the Products page to use it.", "ok")
+        return redirect("/admin/plan-api/%d" % pid)
+    return render_template("admin_plan_api.html", pl=pl, page="products")
+
+
+@app.route("/admin/keys")
+@admin_required
+def admin_keys():
+    rows = q("SELECT k.*, r.username FROM license_keys k JOIN resellers r ON r.id=k.reseller_id ORDER BY k.id DESC LIMIT 500")
+    return render_template("admin_keys.html", rows=rows, now=int(time.time()), page="keys")
 
 
 @app.route("/admin/resellers", methods=["GET", "POST"])
