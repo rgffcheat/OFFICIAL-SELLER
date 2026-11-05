@@ -43,3 +43,19 @@ LOGIN: username + password -> (new device: admin gets Accept/Reject in Telegram)
 ALERTS: NEW PURCHASE ALERT (panel + API), LOW BALANCE ALERT, BALANCE ADDED.
 ADD BALANCE AMOUNTS: Admin > Gateway > "Add-balance amounts" (e.g. 100, 300, 500).
 BACKUP: music now has its OWN backup (Admin > Backup > Music Backup .zip). The normal backup no longer contains music.
+
+---- v7 ----
+LOGIN CODE (Telegram): every login makes a NEW random 6-digit code and sends it to the reseller's Telegram.
+  Wrong code / too many tries = never reaches the dashboard. Right code = dashboard. A code works only once, for 5 minutes.
+  The code is now sent immediately, and if Telegram refuses, the REAL reason is shown on the verification page
+  (e.g. "Chat ID is wrong, or that person never pressed START in the bot") instead of failing silently.
+  The verification page shows the last 4 digits of the Chat ID the code was sent to.
+MASTER SWITCH: Admin > Telegram > "Login code for resellers" (untick = nobody needs a code until the bot works).
+  Per reseller: Admin > Resellers > Manage > Login code ON/OFF (or the reseller's own Security page).
+LINKING EXISTING RESELLERS: Admin > Resellers: every "Not linked" reseller has a Chat ID box + Link button.
+  Everybody who pressed /start in the bot is listed, so you can tap the name (Manage page) or pick the ID.
+  Saving a Chat ID sends a test message at once and tells you if it was really delivered.
+DELIVERY LOG: Admin > Telegram shows the last sends (Delivered / Failed + exact reason), per-reseller Test buttons,
+  and warns if another copy of the bot (same token) is running somewhere else.
+PURCHASE ALERT: product, quantity, wallet balance left, validity, amount paid, TIME, key issued.
+LOW BALANCE ALERT: sent after every purchase while the balance is under the reseller's limit (default 50).

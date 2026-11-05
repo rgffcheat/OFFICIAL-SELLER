@@ -321,7 +321,7 @@ p();
 </script>""" + LGFOOT + "</body></html>"
 
 T["login_verify.html"] = LGHEAD + """<div class="logo-t">{{ic('shield2',30)}}</div><h1>Verification</h1><div class="dv"><i></i><u></u><i></i></div>
-<div class="tag">{{ic('send',18)}} Code sent to Telegram</div>""" + FLASH + """
+<div class="tag">{{ic('send',18)}} Code sent to Telegram{% if tg_mask %} &middot; ID {{tg_mask}}{% endif %}</div>""" + FLASH + """
 <form method=post autocomplete=off>
 <label for=cd>Enter the 6-digit code</label>
 <div class="fld">{{ic('lock',20)}}<input id=cd name=code inputmode=numeric pattern="[0-9]{6}" maxlength=6 minlength=6 placeholder="000000" required autofocus autocomplete=one-time-code style="letter-spacing:.4em;font-weight:800;font-size:20px"></div>
@@ -388,9 +388,28 @@ T["admin_telegram.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic('
 <p class=mu>Your (admin) Telegram Chat ID &mdash; or simply open the bot and send <code>/admin YOUR_ADMIN_PASSWORD</code> and it fills itself. Device requests come here{% if env_adm %} <b>(set inside app.py / env, it wins)</b>{% endif %}</p>
 <input name=admin_id value="{{admin_id}}" placeholder="e.g. 123456789" style="width:100%" inputmode=numeric>
 <label class=mu style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type=checkbox name=dev_check value=1 {{'checked' if dev_check}} style="width:auto"> Require admin approval for every new reseller device</label>
+<label class=mu style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type=checkbox name=otp_global value=1 {{'checked' if otp_global}} style="width:auto"> <b>Login code (6-digit, Telegram) for resellers</b> &mdash; master switch. Untick = nobody needs a code (direct login) until the bot works.</label>
 <button class=g style="margin-top:12px">{{ic('save')}} Save</button></form></div>
 <div class=card><h3>Test</h3><form method=post><input type=hidden name=action value=test><button>{{ic('send')}} Send test message to me</button></form>
-<p class=hint>Open your bot in Telegram and press Start first, otherwise Telegram will not let the bot message you.</p></div>{% endblock %}"""
+<p class=hint>Open your bot in Telegram and press Start first, otherwise Telegram will not let the bot message you.</p></div>
+
+<div class=card><h3>Resellers &amp; Telegram</h3>
+<div class=mu style="margin-bottom:8px">Login code master switch: {% if otp_global %}<span class="pill a">ON</span>{% else %}<span class="pill e">OFF (everyone logs in without a code)</span>{% endif %}</div>
+<div class=tw><table><tr><th>Reseller</th><th>Telegram</th><th>Code</th><th></th></tr>
+{% for x in rs %}<tr><td><a href="/admin/reseller/{{x.id}}">{{x.username}}</a></td>
+<td>{% if x.tg_chat %}<span class="pill a">Linked</span> <span class=mu>{{x.tg_chat}}</span>{% else %}<span class="pill e">Not linked</span>{% endif %}</td>
+<td>{% if x.otp_on %}<span class="pill a">ON</span>{% else %}<span class="pill e">OFF</span>{% endif %}</td>
+<td>{% if x.tg_chat %}<form method=post><input type=hidden name=action value=test_reseller><input type=hidden name=id value="{{x.id}}"><button class=o>Test</button></form>{% endif %}</td></tr>
+{% else %}<tr><td colspan=4>No resellers</td></tr>{% endfor %}</table></div>
+{% if seen %}<p class=mu style="margin-top:12px">Pressed /start in the bot but not linked yet (open the reseller &rarr; Manage and tap the name):</p>
+{% for s in seen %}<span class="pill p" style="margin:2px">{{s.name or '?'}}{% if s.username %} @{{s.username}}{% endif %} &middot; {{s.chat_id}}</span>{% endfor %}{% endif %}</div>
+
+<div class=card><h3>Delivery log</h3>
+<div class=mu>Receiving: {% if poll_err %}<span class="pill e">Problem</span> {{poll_err}}{% else %}<span class="pill a">OK</span>{% endif %} &middot; sent OK <b>{{sent_ok}}</b> &middot; failed <b>{{sent_fail}}</b> (since the server started)</div>
+<div class=tw style="margin-top:8px"><table><tr><th>Time</th><th>To</th><th>What</th><th>Result</th></tr>
+{% for t,ok,chat,what,err in log %}<tr><td>{{t|dt}}</td><td>{{chat}}</td><td>{{what}}</td><td>{% if ok %}<span class="pill a">Delivered</span>{% else %}<span class="pill e">Failed</span> <span class=mu>{{err}}</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan=4>Nothing sent yet</td></tr>{% endfor %}</table></div>
+<p class=hint>If a login code never arrives, look here: the exact reason from Telegram is shown for every failed message.</p></div>{% endblock %}"""
 
 T["admin_devices.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic('phone',24)}} Devices</h2>
 <div class="card tw"><table><tr><th>Reseller</th><th>Device</th><th>Status</th><th>Requested</th><th></th></tr>
@@ -414,13 +433,22 @@ T["admin_resellers.html"] = T["admin_resellers.html"].replace(
     '<input name=credit type=number step=any value=0 placeholder="Starting credit" style="width:140px">',
     '<input name=credit type=number step=any value=0 placeholder="Starting credit" style="width:140px"><input name=tg_chat placeholder="Telegram Chat ID (optional)" inputmode=numeric style="width:210px">', 1
 ).replace('<th>Keys</th><th>Status</th>', '<th>Keys</th><th>Telegram</th><th>Status</th>', 1
-).replace('<td>{{x.kc}}</td>', '<td>{{x.kc}}</td><td>{% if x.tg_chat %}<span class="pill a">Linked</span>{% else %}<span class=mu>-</span>{% endif %}</td>', 1
-).replace('colspan=5>No resellers', 'colspan=6>No resellers', 1)
+).replace('<td>{{x.kc}}</td>', '<td>{{x.kc}}</td><td>{% if x.tg_chat %}<span class="pill a">Linked</span> <span class=mu>{{x.tg_chat}}</span>{% else %}<span class="pill e">Not linked</span>'
+          '<form class=row method=post action="/admin/reseller/{{x.id}}" style="margin-top:6px;flex-wrap:nowrap"><input type=hidden name=action value=tg>'
+          '<input name=tg_chat list=seenids placeholder="Chat ID" inputmode=numeric style="width:130px"><button class=g>Link</button></form>{% endif %}</td>', 1
+).replace('colspan=5>No resellers', 'colspan=6>No resellers', 1
+).replace('</table></div>{% endblock %}', '</table></div>'
+          '<datalist id=seenids>{% for s in seen %}<option value="{{s.chat_id}}">{{s.name}} {{s.username}}</option>{% endfor %}</datalist>'
+          '{% if seen %}<div class=card><h3>Pressed /start in the bot (not linked yet)</h3>{% for s in seen %}<span class="pill p" style="margin:2px">{{s.name or "?"}}{% if s.username %} @{{s.username}}{% endif %} &middot; {{s.chat_id}}</span>{% endfor %}'
+          '<p class=hint>Type or pick the Chat ID in the reseller row above and press Link. A test message is sent to confirm.</p></div>{% endif %}{% endblock %}', 1)
 
 # ---- admin reseller manage: telegram + verification + devices
 T["admin_reseller.html"] = T["admin_reseller.html"].replace('<div class=card><h3>Change Password</h3>', r"""<div class=card><h3>{{ic('send',20)}} Telegram &amp; Security</h3>
 <form class=row method=post><input type=hidden name=action value=tg><input name=tg_chat value="{{r.tg_chat or ''}}" placeholder="Telegram Chat ID (empty = unlink)" inputmode=numeric style="min-width:220px"><button class=g>Save</button></form>
-<p class=hint>The reseller opens your bot, presses Start and sends you the Chat ID shown there.</p>
+<form method=post style="display:inline"><input type=hidden name=action value=tg_test><button class=o {{'disabled' if not r.tg_chat}}>Send test message</button></form>
+{% if seen %}<p class=mu style="margin:12px 0 4px">Pressed /start in the bot &mdash; tap to link:</p>
+{% for s in seen %}<form method=post style="display:inline"><input type=hidden name=action value=tg><input type=hidden name=tg_chat value="{{s.chat_id}}"><button class=o style="margin:2px">{{s.name or '?'}}{% if s.username %} @{{s.username}}{% endif %} &middot; {{s.chat_id}}</button></form>{% endfor %}{% endif %}
+<p class=hint>The reseller opens your bot and presses Start (the bot shows his Chat ID). His name appears above, or paste the ID by hand. After saving, a test message is sent so you know it really works.</p>
 <div style="margin-top:10px">Login code: {% if r.otp_on %}<span class="pill a">ON</span>{% else %}<span class="pill e">OFF</span>{% endif %}
 <form method=post style="display:inline"><input type=hidden name=action value=otp_toggle><button class=o style="margin-left:8px">Switch</button></form></div>
 {% if devs %}<div class=tw style="margin-top:10px"><table>{% for d in devs %}<tr><td>{{d.label}} <span class=mu>{{d.ip}}</span></td><td>{{d.status}}</td></tr>{% endfor %}</table></div><a href="/admin/devices">Manage devices &rarr;</a>{% endif %}</div>

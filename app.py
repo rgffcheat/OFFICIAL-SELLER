@@ -89,6 +89,7 @@ def init_db():
       created INTEGER NOT NULL, decided INTEGER, last_seen INTEGER);
     CREATE TABLE IF NOT EXISTS otps(reseller_id INTEGER PRIMARY KEY, h TEXT NOT NULL, exp INTEGER NOT NULL,
       tries INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS tg_seen(chat_id TEXT PRIMARY KEY, name TEXT, username TEXT, ts INTEGER NOT NULL);
     """)
     cols = [r[1] for r in c.execute("PRAGMA table_info(plans)")]
     for col, ddl in (("mode", "TEXT DEFAULT 'random'"), ("ext_url", "TEXT DEFAULT ''"),
@@ -581,7 +582,23 @@ def device_decision(did, approve):
     return ("Approved: " if approve else "Rejected: ") + d["username"]
 
 
-bot = tgbot.Bot(tg_token, tg_admin, device_decision, BRAND, claim_admin)
+def tg_seen(chat_id, name, username):
+    """Remember everybody who pressed /start in the bot, so the admin can link them with one click."""
+    q("INSERT OR REPLACE INTO tg_seen(chat_id,name,username,ts) VALUES(?,?,?,?)",
+      (str(chat_id), (name or "")[:60], (username or "")[:40], int(time.time())), commit=True)
+
+
+def otp_global_on():
+    """Master switch (Admin > Telegram). OFF = nobody needs a code (use it if the bot is not delivering yet)."""
+    return get_setting("otp_global", "1") == "1"
+
+
+def mask_id(tc):
+    tc = str(tc or "")
+    return ("•" * max(len(tc) - 4, 0) + tc[-4:]) if tc else ""
+
+
+bot = tgbot.Bot(tg_token, tg_admin, device_decision, BRAND, claim_admin, tg_seen)
 
 
 def ua_label(ua):
@@ -601,12 +618,13 @@ def notify_purchase(r, pl, price, bal, key, via):
     bot.send(r["tg_chat"],
              "<blockquote>\u2705 <b>NEW PURCHASE ALERT</b></blockquote>\n%s\n"
              "\u2705 Product: <b>%s</b>\n\U0001F6D2 Quantity: 1\n\U0001F4B0 Wallet Balance: <b>%s</b>\n"
-             "\u23F1 Validity: %d days\n\U0001F4B8 Paid: <b>%s</b>\n\U0001F6AB Paid by: Wallet (%s)\n"
+             "\u23F1 Validity: %d days (%d DAYS)\n\U0001F4B8 Paid: <b>%s</b>\n\U0001F6AB Paid by: Wallet (%s)\n"
+             "\U0001F552 Time: %s\n"
              "\U0001F511 Key Issued: <code>%s</code>\n%s"
-             % (line, esc(pl["pname"]), money_txt(bal), int(pl["days"]), money_txt(price),
-                "API" if via == "api" else "Panel", esc(key), line))
+             % (line, esc(pl["pname"]), money_txt(bal), int(pl["days"]), int(pl["days"]), money_txt(price),
+                "API" if via == "api" else "Panel", fmt(time.time()), esc(key), line))
     lim = r["low_bal"] or 0
-    if lim > 0 and bal < lim <= r["balance"]:           # only when the balance just dropped under the limit
+    if lim > 0 and bal < lim:                           # wallet is under the limit -> warn after every purchase
         bot.send(r["tg_chat"],
                  "<blockquote>\U0001F6A8 <b>LOW BALANCE ALERT</b></blockquote>\n%s\n"
                  "\U0001F4B0 Wallet Balance: <b>%s</b>\n\U0001F6A8 Low balance limit: %s\n"
@@ -643,16 +661,20 @@ def otp_hash(rid, code):
 def send_otp(r, force=False):
     now = int(time.time())
     o = q("SELECT * FROM otps WHERE reseller_id=?", (r["id"],), one=True)
+    # Makes a NEW random 6-digit code and sends it right now (not queued), so a failure is known immediately.
     if o and not force and now - o["sent"] < 30 and o["exp"] > now:
-        return                                           # a fresh code was just sent
+        return True, ""                                  # a fresh code was just sent
     code = "%06d" % secrets.randbelow(1000000)
     q("INSERT OR REPLACE INTO otps(reseller_id,h,exp,tries,sent) VALUES(?,?,?,?,?)",
       (r["id"], otp_hash(r["id"], code), now + 300, 0, now), commit=True)
-    bot.send(r["tg_chat"],
+    ok, err = bot.send_now(r["tg_chat"],
              "<blockquote>\U0001F510 <b>Login verification</b></blockquote>\n\n"
              "Use this one-time code to sign in to <b>%s</b>.\n\n<blockquote><code>%s</code></blockquote>\n\n"
              "\u23F1 Expires in <b>5 minutes</b>.\n\U0001F6AB Keep this code private. Our team will never ask for it."
-             % (esc(BRAND), code))
+             % (esc(BRAND), code), what="login code (%s)" % r["username"])
+    if not ok:
+        q("DELETE FROM otps WHERE reseller_id=?", (r["id"],), commit=True)    # nothing was delivered, so no valid code
+    return ok, err
 
 
 def check_otp(rid, code):
@@ -738,12 +760,14 @@ def finish_login(r, dev, alert=False):
     return "/dashboard"
 
 
-def next_step(r, dev):
+def next_step(r, dev, fresh=False):
     """After password (+ device approval): code check if enabled, otherwise straight in. Returns a URL."""
-    if r["otp_on"] and r["tg_chat"] and tg_token():
+    if otp_global_on() and r["otp_on"] and r["tg_chat"] and tg_token():
         session.clear()
         session["pre"] = dict(rid=r["id"], dev=dev, ts=int(time.time()))
-        send_otp(r)
+        ok, err = send_otp(r, force=fresh)       # fresh=True: every new login gets its own brand-new code
+        if not ok:        # never let anybody in without a code - tell them why it did not arrive
+            flash("The code could not be sent to your Telegram: %s. Press Resend, or tell the admin." % err[:160], "err")
         return "/login/verify"
     return finish_login(r, dev, alert=True)
 
@@ -811,7 +835,7 @@ def do_login():
                         session.clear()
                         session["pre"] = dict(rid=r["id"], dev=dev, ts=int(time.time()))
                         return out(redirect("/login/wait"))
-                return out(with_theme(redirect(next_step(r, dev)), r))
+                return out(with_theme(redirect(next_step(r, dev, fresh=True)), r))
         else:
             rl_hit("ip:" + ip)
             flash("Invalid username or password", "err")
@@ -854,24 +878,30 @@ def login_verify():
     r, p = pre_reseller()
     if not r or request.cookies.get("rgd") != p["dev"]:
         return redirect("/login")
+    if not (otp_global_on() and r["otp_on"] and r["tg_chat"]):
+        return redirect("/login")                        # code was switched OFF meanwhile -> log in again, no code needed
+    mk = mask_id(r["tg_chat"])
     if request.method == "POST":
         if request.form.get("action") == "resend":
             if rl_blocked("otp-send:%d" % r["id"], 5, 600):
                 flash("Too many codes requested. Wait a few minutes.", "err")
             else:
                 rl_hit("otp-send:%d" % r["id"])
-                send_otp(r, force=True)
-                flash("A new code was sent to your Telegram.", "ok")
-            return render_template("login_verify.html", title="Verification")
+                ok, err = send_otp(r, force=True)
+                if ok:
+                    flash("A new code was sent to your Telegram.", "ok")
+                else:
+                    flash("The code could not be sent: %s" % err[:160], "err")
+            return render_template("login_verify.html", title="Verification", tg_mask=mk)
         if rl_blocked("otp:%d" % r["id"], 10, 600):
             flash("Too many wrong codes. Please wait 10 minutes.", "err")
-            return render_template("login_verify.html", title="Verification")
+            return render_template("login_verify.html", title="Verification", tg_mask=mk)
         ok, msg = check_otp(r["id"], request.form.get("code", ""))
         if ok:
             return with_theme(redirect(finish_login(r, p["dev"])), r)
         rl_hit("otp:%d" % r["id"])
         flash(msg, "err")
-    return render_template("login_verify.html", title="Verification")
+    return render_template("login_verify.html", title="Verification", tg_mask=mk)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -1288,6 +1318,18 @@ def admin_keys():
     return render_template("admin_keys.html", rows=rows, now=int(time.time()), page="keys")
 
 
+def link_notice(chat_id, username):
+    """Tell a freshly linked chat that it is linked; returns (delivered, error) - this IS the delivery test."""
+    return bot.send_now(chat_id, "✅ <b>%s</b>\n\nYour account <b>%s</b> is now linked. Login codes and purchase "
+                                 "alerts will arrive here." % (esc(BRAND), esc(username)), what="link test (%s)" % username)
+
+
+def seen_unlinked():
+    """People who pressed /start in the bot and are not linked to any reseller yet (newest first)."""
+    return q("SELECT * FROM tg_seen WHERE chat_id NOT IN (SELECT tg_chat FROM resellers WHERE tg_chat<>'') "
+             "ORDER BY ts DESC LIMIT 12")
+
+
 @app.route("/admin/resellers", methods=["GET", "POST"])
 @admin_required
 def admin_resellers():
@@ -1309,14 +1351,16 @@ def admin_resellers():
                   (u, generate_password_hash(p), num(request.form.get("credit")), new_api_key(), int(time.time()), tg),
                   commit=True)
                 if tg:
-                    bot.send(tg, "\u2705 <b>%s</b>\n\nYour account <b>%s</b> is now linked. Login codes and purchase "
-                                 "alerts will arrive here." % (esc(BRAND), esc(u)))
-                flash("Reseller created", "ok")
+                    ok, err = link_notice(tg, u)
+                    flash("Reseller created. " + ("Telegram linked - test message delivered." if ok
+                                                  else "Telegram saved BUT delivery failed: %s" % err), "ok" if ok else "err")
+                else:
+                    flash("Reseller created", "ok")
             except sqlite3.IntegrityError:
                 flash("Username already exists", "err")
         return redirect("/admin/resellers")
     rows = q("SELECT r.*, (SELECT COUNT(*) FROM license_keys k WHERE k.reseller_id=r.id) kc FROM resellers r ORDER BY r.id DESC")
-    return render_template("admin_resellers.html", rows=rows, page="resellers")
+    return render_template("admin_resellers.html", rows=rows, seen=seen_unlinked(), page="resellers")
 
 
 @app.route("/admin/reseller/<int:rid>", methods=["GET", "POST"])
@@ -1340,9 +1384,17 @@ def admin_reseller(rid):
             else:
                 q("UPDATE resellers SET tg_chat=? WHERE id=?", (tg, rid), commit=True)
                 if tg:
-                    bot.send(tg, "\u2705 <b>%s</b>\n\nYour account <b>%s</b> is now linked. Login codes and purchase "
-                                 "alerts will arrive here." % (esc(BRAND), esc(r["username"])))
-                flash("Telegram saved" if tg else "Telegram unlinked", "ok")
+                    ok, err = link_notice(tg, r["username"])
+                    flash("Telegram linked - test message delivered to that chat." if ok else
+                          "Chat ID saved BUT the test message failed: %s" % err, "ok" if ok else "err")
+                else:
+                    flash("Telegram unlinked", "ok")
+        elif a == "tg_test":
+            if not r["tg_chat"]:
+                flash("No Chat ID saved for this reseller yet", "err")
+            else:
+                ok, err = link_notice(r["tg_chat"], r["username"])
+                flash("Test message delivered" if ok else "Delivery failed: %s" % err, "ok" if ok else "err")
         elif a == "otp_toggle":
             q("UPDATE resellers SET otp_on=1-otp_on WHERE id=?", (rid,), commit=True)
             flash("Login verification changed", "ok")
@@ -1361,7 +1413,7 @@ def admin_reseller(rid):
         return redirect("/admin/reseller/%d" % rid)
     cat = catalog(rid)
     devs = q("SELECT * FROM devices WHERE reseller_id=? ORDER BY id DESC", (rid,))
-    return render_template("admin_reseller.html", r=r, cat=cat, devs=devs, page="resellers")
+    return render_template("admin_reseller.html", r=r, cat=cat, devs=devs, seen=seen_unlinked(), page="resellers")
 
 
 @app.route("/admin/gateway", methods=["GET", "POST"])
@@ -1415,15 +1467,27 @@ def admin_telegram():
                 return redirect("/admin/telegram")
             set_setting("tg_admin", adm_id)
             set_setting("dev_check", "1" if f.get("dev_check") else "0")
+            set_setting("otp_global", "1" if f.get("otp_global") else "0")
             flash("Telegram settings saved", "ok")
         elif a == "test":
-            ok, err = bot.send_now(tg_admin(), "\u2705 <b>%s</b>\nTest message - the bot is connected." % esc(BRAND))
-            flash("Test message sent to your Telegram" if ok else "Could not send: %s (open the bot and press Start first)" % err,
-                  "ok" if ok else "err")
+            ok, err = bot.send_now(tg_admin(), "\u2705 <b>%s</b>\nTest message - the bot is connected." % esc(BRAND),
+                                   what="admin test")
+            flash("Test message sent to your Telegram" if ok else "Could not send: %s" % err, "ok" if ok else "err")
+        elif a == "test_reseller":
+            r = q("SELECT * FROM resellers WHERE id=?", (int(num(f.get("id"))),), one=True)
+            if r and r["tg_chat"]:
+                ok, err = link_notice(r["tg_chat"], r["username"])
+                flash(("Delivered to %s" % r["username"]) if ok else "%s: delivery FAILED - %s" % (r["username"], err),
+                      "ok" if ok else "err")
+            else:
+                flash("That reseller has no Chat ID", "err")
         return redirect("/admin/telegram")
     me = bot.me() if tg_token() else None
+    rs = q("SELECT id, username, tg_chat, otp_on, notify, active FROM resellers ORDER BY (tg_chat='' OR tg_chat IS NULL), username")
     return render_template("admin_telegram.html", me=me, has_token=bool(tg_token()), tail=tg_token()[-4:],
                            admin_id=tg_admin(), dev_check=get_setting("dev_check", "1") == "1",
+                           otp_global=otp_global_on(), rs=rs, log=list(bot.log), poll_err=bot.poll_err,
+                           sent_ok=bot.sent_ok, sent_fail=bot.sent_fail, seen=seen_unlinked(),
                            env_tok=bool(os.environ.get("TG_BOT_TOKEN") or TG_BOT_TOKEN), env_adm=bool(os.environ.get("ADMIN_TG_ID") or TG_ADMIN_ID),
                            active=dev_check_on(), page="telegram")
 

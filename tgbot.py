@@ -6,12 +6,14 @@ What it does
   * Sends "NEW PURCHASE ALERT", "LOW BALANCE ALERT", "BALANCE ADDED" to resellers
   * Sends "NEW DEVICE LOGIN REQUEST" to the admin with [Accept] / [Reject] buttons
   * /start  -> shows the user's own Chat ID (reseller gives this ID to the admin)
+  * remembers everybody who pressed /start (admin can link them with one click)
+  * keeps a delivery log (last 40 sends / errors) so a missing message is never a mystery
 
 It only needs the 'requests' package. Messages go through one queue, so a burst of
 purchases never hits Telegram's rate limit (429 is retried automatically).
 """
+import collections
 import html
-import json
 import queue
 import threading
 import time
@@ -21,27 +23,66 @@ import requests
 API = "https://api.telegram.org/bot%s/%s"
 
 
+def nice_error(err):
+    """Turn a raw Telegram error into a sentence the admin can act on."""
+    e = str(err or "")
+    low = e.lower()
+    if "chat not found" in low:
+        return "Chat ID is wrong, or that person never pressed START in the bot (%s)" % e
+    if "blocked by the user" in low:
+        return "That person blocked the bot (%s)" % e
+    if "deactivated" in low:
+        return "That Telegram account is deactivated (%s)" % e
+    if "unauthorized" in low or "not found" == low.strip():
+        return "Bot token is wrong - Telegram rejected it (%s)" % e
+    if "conflict" in low:
+        return "Another copy of this bot is running somewhere else with the same token (%s)" % e
+    if low.startswith("network"):
+        return "Server could not reach Telegram (%s)" % e
+    return e
+
+
 class Bot:
-    def __init__(self, get_token, get_admin, on_device, brand="RG CHEAT", on_claim=None):
+    def __init__(self, get_token, get_admin, on_device, brand="RG CHEAT", on_claim=None, on_seen=None):
         self.get_token = get_token          # () -> bot token (str)
         self.get_admin = get_admin          # () -> admin chat id (str)
         self.on_device = on_device          # (device_row_id:int, approve:bool) -> text
         self.brand = brand
         self.on_claim = on_claim            # (chat_id, secret) -> bool  ("/admin <password>")
+        self.on_seen = on_seen              # (chat_id, name, username) -> None  (someone pressed /start)
         self.q = queue.Queue(maxsize=2000)
         self._hook_cleared = None
         self._started = False
+        self.log = collections.deque(maxlen=40)    # (time, ok, chat_id, what, error)
+        self.sent_ok = 0
+        self.sent_fail = 0
+        self.poll_err = ""                  # last problem while receiving (empty = fine)
+        self.poll_ok = 0                    # time of last successful poll
+
+    def _note(self, ok, chat_id, what, err=""):
+        self.log.appendleft((int(time.time()), ok, str(chat_id), what, err))
+        if ok:
+            self.sent_ok += 1
+        else:
+            self.sent_fail += 1
 
     # ------------------------------------------------------------ low level
     def api(self, method, _timeout=20, **params):
         tok = self.get_token()
         if not tok:
             raise RuntimeError("bot token not set")
-        r = requests.post(API % (tok, method), json=params, timeout=_timeout)
+        try:
+            r = requests.post(API % (tok, method), json=params, timeout=_timeout)
+        except requests.RequestException as ex:
+            e = RuntimeError("Network error: %s" % type(ex).__name__)
+            e.network = True
+            raise e
         try:
             j = r.json()
         except ValueError:
-            raise RuntimeError("Telegram HTTP %s" % r.status_code)
+            e = RuntimeError("Telegram HTTP %s" % r.status_code)
+            e.network = True
+            raise e
         if not j.get("ok"):
             e = RuntimeError(str(j.get("description") or "Telegram error")[:150])
             e.retry_after = (j.get("parameters") or {}).get("retry_after")
@@ -61,38 +102,49 @@ class Bot:
         if not chat_id or not self.get_token():
             return False
         try:
-            self.q.put_nowait((chat_id, text, buttons, 0))
+            self.q.put_nowait((chat_id, text, buttons))
             return True
         except queue.Full:
             return False
 
-    def send_now(self, chat_id, text, buttons=None):
-        """Send immediately and return (ok, error_text) - used by the 'test' buttons."""
-        try:
-            self._send(chat_id, text, buttons)
-            return True, ""
-        except Exception as e:
-            return False, str(e)
+    def send_now(self, chat_id, text, buttons=None, what="message"):
+        """Send immediately (waits for Telegram). Returns (ok, readable_error). Retries flood-control / network hiccups."""
+        chat_id = str(chat_id or "").strip()
+        if not chat_id:
+            return False, "No Chat ID"
+        if not self.get_token():
+            return False, "Bot token is not set"
+        err = ""
+        for attempt in range(3):
+            try:
+                self._send(chat_id, text, buttons)
+                self._note(True, chat_id, what)
+                return True, ""
+            except Exception as e:
+                err = nice_error(e)
+                wait = getattr(e, "retry_after", None)
+                if wait and attempt < 2:
+                    time.sleep(min(int(wait) + 1, 8))
+                elif getattr(e, "network", False) and attempt < 2:
+                    time.sleep(1.5)
+                else:
+                    break
+        self._note(False, chat_id, what, err)
+        return False, err
 
     def _send(self, chat_id, text, buttons):
         p = dict(chat_id=chat_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
         if buttons:
             p["reply_markup"] = {"inline_keyboard": [[{"text": a, "callback_data": b} for a, b in row] for row in buttons]}
-        return self.api("sendMessage", **p)
+        return self.api("sendMessage", _timeout=8, **p)
 
     def _sender(self):
         while True:
-            chat_id, text, buttons, tries = self.q.get()
+            chat_id, text, buttons = self.q.get()
             try:
-                self._send(chat_id, text, buttons)
-            except Exception as e:
-                wait = getattr(e, "retry_after", None)
-                if wait and tries < 5:                    # flood control: wait and retry
-                    time.sleep(min(int(wait) + 1, 60))
-                    self.q.put((chat_id, text, buttons, tries + 1))
-                elif tries < 2 and "HTTP" in str(e):      # temporary network problem
-                    time.sleep(3)
-                    self.q.put((chat_id, text, buttons, tries + 1))
+                self.send_now(chat_id, text, buttons, what="alert")
+            except Exception:
+                pass
             time.sleep(0.05)
 
     # ------------------------------------------------------------ receiving
@@ -109,13 +161,16 @@ class Bot:
                     self._hook_cleared = tok
                 ups = self.api("getUpdates", _timeout=40, offset=offset, timeout=25,
                                allowed_updates=["message", "callback_query"]) or []
+                self.poll_err = ""
+                self.poll_ok = int(time.time())
                 for u in ups:
                     offset = u["update_id"] + 1
                     try:
                         self._handle(u)
                     except Exception:
                         pass
-            except Exception:
+            except Exception as e:
+                self.poll_err = nice_error(e)
                 time.sleep(5)
 
     def _handle(self, u):
@@ -133,6 +188,13 @@ class Bot:
                           else "❌ Wrong password (or too many tries).")
                 return
             if text.startswith("/start") or text.startswith("/id") or text.startswith("/myid"):
+                if self.on_seen:
+                    try:
+                        frm = m.get("from") or {}
+                        nm = " ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x)
+                        self.on_seen(cid, nm, frm.get("username") or "")
+                    except Exception:
+                        pass
                 self.send(cid, "👋 <b>Welcome to %s</b>\n\nYour Telegram Chat ID:\n<code>%s</code>\n\n"
                                "Send this ID to the admin. After he links it you will get login codes "
                                "and purchase alerts here." % (html.escape(self.brand), cid))
