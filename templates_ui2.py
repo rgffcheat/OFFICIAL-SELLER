@@ -798,3 +798,17 @@ T["admin_reseller.html"] = T["admin_reseller.html"].replace("{% endblock %}", r"
 <form method=post action="/admin/reseller/{{r.id}}/bot/restore" enctype=multipart/form-data style="margin-top:10px"><input type=file name=database accept=".db,.sqlite,.sqlite3" required><button class=o>Restore Database &amp; Restart</button></form>
 <form method=post action="/admin/reseller/{{r.id}}/bot/delete" onsubmit="return confirm('Delete this reseller bot and its files?')" style="margin-top:10px"><button class=r>Delete Bot</button></form>{% else %}<p class=mu>No bot created yet.</p>{% endif %}</div>
 {% endblock %}""")
+
+T["admin_bot_maker.html"] = r"""{% extends 'abase.html' %}{% block c %}
+<h2>🤖 Bot Maker Management</h2>
+<div class=card><p class=mu>Enable Bot Maker separately for each reseller. When hidden, the reseller cannot see or open the Bot Maker page. Each reseller can create one bot only.</p></div>
+<div class="card tw"><table><tr><th>Reseller</th><th>Access</th><th>Bot</th><th>Runtime</th><th>Action</th></tr>
+{% for x in rows %}<tr>
+<td><b>{{x.username}}</b><div class=mu>ID: {{x.id}}</div></td>
+<td>{% if x.bot_make_enabled %}<span class="pill a">VISIBLE</span>{% else %}<span class="pill e">HIDDEN</span>{% endif %}</td>
+<td>{% if x.bot_name %}<b>{{x.bot_name}}</b><div class=mu>Admin ID: {{x.admin_id}}</div>{% else %}<span class=mu>Not created</span>{% endif %}</td>
+<td>{% if x.runtime_status=='running' %}<span class="pill a">RUNNING</span>{% elif x.runtime_status=='not-created' %}<span class="pill p">NOT CREATED</span>{% else %}<span class="pill e">{{x.runtime_status|upper}}</span>{% endif %}
+{% if x.last_error %}<div class=mu>{{x.last_error}}</div>{% endif %}</td>
+<td style="white-space:nowrap"><form method=post action="/admin/bot-maker/{{x.id}}/toggle"><button class="{{'r' if x.bot_make_enabled else 'g'}}">{{'Hide' if x.bot_make_enabled else 'Show'}} Bot Maker</button></form><a class=btn href="/admin/reseller/{{x.id}}">Manage</a></td>
+</tr>{% else %}<tr><td colspan=5>No resellers found.</td></tr>{% endfor %}</table></div>
+{% endblock %}"""

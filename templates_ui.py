@@ -255,7 +255,7 @@ print(r.get("key"))</pre></div>{% endblock %}"""
 
 T["abase.html"] = HEAD + """Admin</title><style>""" + CSS + """</style></head><body>
 <div class=nav><b class=logo style="padding:7px 10px;display:inline-flex;align-items:center;gap:8px">{{ic('tool')}} ADMIN</b><a href="/admin" class="{{'on' if page=='home'}}">Home</a><a href="/admin/products" class="{{'on' if page=='products'}}">Products</a>
-<a href="/admin/keys" class="{{'on' if page=='keys'}}">Sold Keys</a><a href="/admin/resellers" class="{{'on' if page=='resellers'}}">Resellers</a><a href="/admin/main-api" class="{{'on' if page=='mapi'}}">Main API</a><a href="/admin/backup" class="{{'on' if page=='backup'}}">Backup</a><a href="/admin/music" class="{{'on' if page=='music'}}">Music</a><a href="/admin/logout" style="margin-left:auto">Logout</a></div>
+<a href="/admin/keys" class="{{'on' if page=='keys'}}">Sold Keys</a><a href="/admin/resellers" class="{{'on' if page=='resellers'}}">Resellers</a><a href="/admin/bot-maker" class="{{'on' if page=='botmaker'}}">🤖 Bot Maker</a><a href="/admin/main-api" class="{{'on' if page=='mapi'}}">Main API</a><a href="/admin/backup" class="{{'on' if page=='backup'}}">Backup</a><a href="/admin/music" class="{{'on' if page=='music'}}">Music</a><a href="/admin/logout" style="margin-left:auto">Logout</a></div>
 <div class=wrap>""" + FLASH + """{% block c %}{% endblock %}</div></body></html>"""
 
 T["admin_home.html"] = """{% extends 'abase.html' %}{% block c %}<h2>Overview</h2><div class=grid>

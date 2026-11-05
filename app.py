@@ -1900,6 +1900,34 @@ def admin_reseller(rid):
     return render_template("admin_reseller.html", r=r, cat=cat, devs=devs, seen=seen_unlinked(), bot_row=bot_row, bot_status=bot_status, page="resellers")
 
 
+
+@app.route("/admin/bot-maker", methods=["GET"])
+@admin_required
+def admin_bot_maker():
+    rows = q("""SELECT r.id, r.username, r.active, r.bot_make_enabled,
+                     b.bot_name, b.admin_id, b.instance_id, b.instance_dir,
+                     b.status AS saved_status, b.last_error, b.created_at
+              FROM resellers r LEFT JOIN reseller_bots b ON b.reseller_id=r.id
+              ORDER BY r.id DESC""")
+    items = []
+    for row in rows:
+        d = dict(row)
+        d["runtime_status"] = (_botmaker_status(d["instance_id"], d["instance_dir"])
+                               if d.get("instance_id") else "not-created")
+        items.append(d)
+    return render_template("admin_bot_maker.html", rows=items, page="botmaker")
+
+@app.route("/admin/bot-maker/<int:rid>/toggle", methods=["POST"])
+@admin_required
+def admin_bot_maker_toggle(rid):
+    r = q("SELECT id FROM resellers WHERE id=?", (rid,), one=True)
+    if not r:
+        abort(404)
+    q("UPDATE resellers SET bot_make_enabled=1-bot_make_enabled WHERE id=?", (rid,), commit=True)
+    flash("Bot Maker access updated for reseller.", "ok")
+    return redirect("/admin/bot-maker")
+
+
 @app.route("/admin/gateway", methods=["GET", "POST"])
 @admin_required
 def admin_gateway():

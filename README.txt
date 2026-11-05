@@ -94,8 +94,9 @@ MUSIC: upload shows a progress bar; reseller panel no longer pre-downloads songs
 RENDER: set Start Command to  gunicorn app:app --workers 1 --threads 32 --timeout 120 --bind 0.0.0.0:$PORT
 
 
-BOT MAKER (v10.4)
-- Admin can show/hide Bot Maker per reseller from Admin > Resellers > Manage.
+BOT MAKER (v10.5)
+- Admin sidebar now has a dedicated 🤖 Bot Maker page. Open Admin > Bot Maker to see every reseller and Show/Hide access individually.
+- You can also manage a reseller and change Bot Maker access from Admin > Resellers > Manage.
 - Each reseller can create one bot only, using Bot Name, BotFather token and Telegram Admin ID.
 - The bot database is cloned from the bundled shop_data.db template; customer activity is cleared and the new admin ID is seeded. Product/catalog/settings and RG API System 2 mappings are retained.
 - Admin can view status, restart/delete the bot, download its SQLite DB, and upload a verified DB restore.
