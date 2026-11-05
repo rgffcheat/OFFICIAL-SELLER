@@ -65,3 +65,10 @@ Login no longer waits for Telegram: the code is sent in the background and the v
 "Sending... / Code delivered / Could not send: <reason>" live. If Telegram is slow the page still opens at once.
 Telegram connections are forced to IPv4 (broken IPv6 routes can make requests hang on Render) and have short timeouts.
 Failed Telegram sends are also printed to the Render > Logs tab as "[telegram] FAILED ...".
+
+---- v9 (alerts) ----
+Every Telegram message is now sent from its own background thread (no shared queue that could stall).
+Alerts show money in INR (e.g. "59 INR"). Purchase alert: product, quantity, wallet balance, validity, paid, time, key.
+If an alert is NOT sent, the reason is written to Admin > Telegram > Delivery log
+(e.g. "skipped: no Telegram Chat ID linked", "skipped: reseller turned alerts OFF", or the Telegram error).
+Reseller > Security > "Send me a test alert" sends a sample purchase alert at once.

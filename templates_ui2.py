@@ -373,7 +373,8 @@ T["security.html"] = r"""{% extends 'rbase.html' %}{% block c %}
 <label class=mu style="display:flex;gap:8px;align-items:center"><input type=checkbox name=notify value=1 {{'checked' if r.notify}} style="width:auto"> Send me an alert for every purchase / balance added</label>
 <p class=mu style="margin:12px 0 4px">Low balance alert when wallet goes below ({{CURRENCY}}) &mdash; 0 = off</p>
 <input name=low_bal type=number step=any min=0 value="{{r.low_bal|money}}" style="width:140px">
-<div><button class=g style="margin-top:12px">{{ic('save',16)}} Save</button></div></form></div>
+<div><button class=g style="margin-top:12px">{{ic('save',16)}} Save</button></div></form>
+<form method=post style="margin-top:10px"><input type=hidden name=action value=test_alert><button class=o {{'disabled' if not tg_mask}}>{{ic('send',16)}} Send me a test alert</button></form></div>
 
 <div class=card><h3>{{ic('phone',20)}} My devices</h3>
 <div class=mu>Only devices approved by admin can open the panel.</div>

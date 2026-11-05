@@ -9,12 +9,11 @@ What it does
   * remembers everybody who pressed /start (admin can link them with one click)
   * keeps a delivery log (last 40 sends / errors) so a missing message is never a mystery
 
-It only needs the 'requests' package. Messages go through one queue, so a burst of
+It only needs the 'requests' package. Every message is sent from its own short-lived thread (max 4 at once), so a burst of
 purchases never hits Telegram's rate limit (429 is retried automatically).
 """
 import collections
 import html
-import queue
 import socket
 import threading
 import time
@@ -55,7 +54,7 @@ class Bot:
         self.brand = brand
         self.on_claim = on_claim            # (chat_id, secret) -> bool  ("/admin <password>")
         self.on_seen = on_seen              # (chat_id, name, username) -> None  (someone pressed /start)
-        self.q = queue.Queue(maxsize=2000)
+        self._sem = threading.Semaphore(4)         # at most 4 messages in flight (Telegram rate limit)
         self._hook_cleared = None
         self._started = False
         self.log = collections.deque(maxlen=40)    # (time, ok, chat_id, what, error)
@@ -103,16 +102,27 @@ class Bot:
             return None
 
     # ------------------------------------------------------------ sending
-    def send(self, chat_id, text, buttons=None):
-        """Queue a message (HTML). buttons = [[(label, callback_data), ...], ...]. Never blocks, never raises."""
+    def send(self, chat_id, text, buttons=None, what="alert"):
+        """Send in the background (own short-lived thread). Never blocks, never raises."""
+        return self.send_many(chat_id, [(text, buttons)], what=what)
+
+    def send_many(self, chat_id, items, what="alert"):
+        """Send several messages one after another (keeps their order) in one background thread."""
         chat_id = str(chat_id or "").strip()
         if not chat_id or not self.get_token():
+            self._note(False, chat_id or "-", what, "skipped: no Chat ID or bot token")
             return False
-        try:
-            self.q.put_nowait((chat_id, text, buttons))
-            return True
-        except queue.Full:
-            return False
+
+        def work():
+            with self._sem:
+                for text, buttons in items:
+                    try:
+                        self.send_now(chat_id, text, buttons, what=what)
+                    except Exception as e:
+                        self._note(False, chat_id, what, "error: %s" % str(e)[:120])
+                    time.sleep(0.05)
+        threading.Thread(target=work, daemon=True, name="tg-send").start()
+        return True
 
     def send_now(self, chat_id, text, buttons=None, what="message"):
         """Send immediately (waits for Telegram). Returns (ok, readable_error). Retries flood-control / network hiccups."""
@@ -144,15 +154,6 @@ class Bot:
         if buttons:
             p["reply_markup"] = {"inline_keyboard": [[{"text": a, "callback_data": b} for a, b in row] for row in buttons]}
         return self.api("sendMessage", _timeout=8, **p)
-
-    def _sender(self):
-        while True:
-            chat_id, text, buttons = self.q.get()
-            try:
-                self.send_now(chat_id, text, buttons, what="alert")
-            except Exception:
-                pass
-            time.sleep(0.05)
 
     # ------------------------------------------------------------ receiving
     def _poller(self):
@@ -238,5 +239,4 @@ class Bot:
         if self._started:
             return
         self._started = True
-        threading.Thread(target=self._sender, daemon=True, name="tg-send").start()
         threading.Thread(target=self._poller, daemon=True, name="tg-poll").start()

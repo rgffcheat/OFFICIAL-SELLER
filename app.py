@@ -610,26 +610,49 @@ def ua_label(ua):
     return "%s on %s" % (br, os_)
 
 
-def notify_purchase(r, pl, price, bal, key, via):
-    """Telegram 'NEW PURCHASE ALERT' (+ low balance alert) to the reseller. Never raises, never blocks."""
-    if not r["tg_chat"] or not r["notify"]:
-        return
+def inr(v):
+    return "%s INR" % money_txt(v)
+
+
+def purchase_text(pname, days, price, bal, key, via):
     line = "\u2500" * 16
-    bot.send(r["tg_chat"],
-             "<blockquote>\u2705 <b>NEW PURCHASE ALERT</b></blockquote>\n%s\n"
-             "\u2705 Product: <b>%s</b>\n\U0001F6D2 Quantity: 1\n\U0001F4B0 Wallet Balance: <b>%s</b>\n"
-             "\u23F1 Validity: %d days (%d DAYS)\n\U0001F4B8 Paid: <b>%s</b>\n\U0001F6AB Paid by: Wallet (%s)\n"
-             "\U0001F552 Time: %s\n"
-             "\U0001F511 Key Issued: <code>%s</code>\n%s"
-             % (line, esc(pl["pname"]), money_txt(bal), int(pl["days"]), int(pl["days"]), money_txt(price),
-                "API" if via == "api" else "Panel", fmt(time.time()), esc(key), line))
-    lim = r["low_bal"] or 0
-    if lim > 0 and bal < lim:                           # wallet is under the limit -> warn after every purchase
-        bot.send(r["tg_chat"],
-                 "<blockquote>\U0001F6A8 <b>LOW BALANCE ALERT</b></blockquote>\n%s\n"
-                 "\U0001F4B0 Wallet Balance: <b>%s</b>\n\U0001F6A8 Low balance limit: %s\n"
-                 "\U0001F4B0 Please add funds to your wallet to continue purchasing keys.\n%s"
-                 % (line, money_txt(bal), money_txt(lim), line))
+    return ("<blockquote>\u2705 <b>NEW PURCHASE ALERT</b></blockquote>\n%s\n"
+            "\u2705 Product: <b>%s</b>\n\U0001F6D2 Quantity: 1\n\U0001F4B0 Wallet Balance: <b>%s</b>\n"
+            "\u23F1 Validity: %d days (%d DAYS)\n\U0001F4B8 Paid: <b>%s</b>\n\U0001F6AB Paid by: Wallet (%s)\n"
+            "\U0001F552 Time: %s\n"
+            "\U0001F511 Key Issued: <code>%s</code>\n%s"
+            % (line, esc(pname), inr(bal), int(days), int(days), inr(price),
+               "API" if via == "api" else "Panel", fmt(time.time()), esc(key), line))
+
+
+def low_text(bal, lim):
+    line = "\u2500" * 16
+    return ("<blockquote>\U0001F6A8 <b>LOW BALANCE ALERT</b></blockquote>\n%s\n"
+            "\U0001F4B0 Wallet Balance: <b>%s</b>\n\U0001F6A8 Low balance limit: <b>%s</b>\n"
+            "\U0001F4B0 Please add funds to your wallet to continue purchasing keys.\n%s"
+            % (line, inr(bal), inr(lim), line))
+
+
+def notify_purchase(r, pl, price, bal, key, via):
+    """Telegram 'NEW PURCHASE ALERT' (+ low balance alert) to the reseller. Never raises, never blocks.
+    Every outcome (sent / skipped / error) is written to the delivery log (Admin > Telegram)."""
+    who = r["username"]
+    try:
+        if not r["tg_chat"]:
+            bot._note(False, "-", "purchase alert (%s)" % who, "skipped: no Telegram Chat ID linked to this reseller")
+            return
+        if not r["notify"]:
+            bot._note(False, r["tg_chat"], "purchase alert (%s)" % who, "skipped: reseller turned alerts OFF (Security page)")
+            return
+        items = [(purchase_text(pl["pname"], pl["days"], price, bal, key, via), None)]
+        lim = r["low_bal"] or 0
+        if lim > 0 and bal < lim:                       # wallet is under the limit -> warn after every purchase
+            items.append((low_text(bal, lim), None))
+        bot.send_many(r["tg_chat"], items, what="purchase alert (%s)" % who)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        bot._note(False, "-", "purchase alert (%s)" % who, "error: %s" % str(e)[:150])
 
 
 def notify_topup(r, amount):
@@ -637,7 +660,7 @@ def notify_topup(r, amount):
         return
     bot.send(r["tg_chat"], "<blockquote>\U0001F4B0 <b>BALANCE ADDED</b></blockquote>\n"
                            "\u2705 Added: <b>%s</b>\n\U0001F4B0 Wallet Balance: <b>%s</b>"
-             % (money_txt(amount), money_txt(r["balance"])))
+             % (inr(amount), inr(r["balance"])), what="balance added (%s)" % r["username"])
 
 
 # ---- login protection
@@ -1033,6 +1056,13 @@ def security():
             q("UPDATE resellers SET notify=?, low_bal=? WHERE id=?",
               (1 if request.form.get("notify") else 0, max(num(request.form.get("low_bal")), 0), r["id"]), commit=True)
             flash("Alert settings saved", "ok")
+        elif a == "test_alert":
+            if not r["tg_chat"]:
+                flash("Your Telegram is not linked yet. Ask admin to add your Chat ID.", "err")
+            else:
+                ok, err = bot.send_now(r["tg_chat"], purchase_text("TEST PRODUCT", 1, 18, r["balance"], "TEST-KEY-0000", "panel")
+                                       + "\n\n<i>(this is only a test)</i>", what="test alert (%s)" % r["username"])
+                flash("Test alert sent to your Telegram" if ok else "Could not send: %s" % err, "ok" if ok else "err")
         elif a == "rm_device":
             q("DELETE FROM devices WHERE id=? AND reseller_id=?", (int(num(request.form.get("id"))), r["id"]), commit=True)
             flash("Device removed", "ok")
