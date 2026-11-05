@@ -73,11 +73,14 @@ If an alert is NOT sent, the reason is written to Admin > Telegram > Delivery lo
 (e.g. "skipped: no Telegram Chat ID linked", "skipped: reseller turned alerts OFF", or the Telegram error).
 Reseller > Security > "Send me a test alert" sends a sample purchase alert at once.
 
----- v10 ----
-SOLD KEYS (admin): each sale is a card - reseller, product / plan, the KEY in a big copyable box with a Copy button,
-  price, source, time, Active/Expired. Search box + "Copy all shown keys". Shows the newest 1000.
-CREDIT: Admin > Resellers > Manage > Add / Deduct Credit has separate Add and Deduct buttons
-  (deduct cannot take more than the balance).
-SETTINGS (reseller): sidebar > Settings (above Logout) > Change password (needs the current password).
-  Changing it logs out every OTHER device, sends a "PASSWORD CHANGED" alert to the reseller's Telegram.
-  A password set by the admin also ends the reseller's old sessions.
+---- v10.1 ----
+ADMIN > SOLD KEYS: new card layout (no broken keys). Key is in its own box, tap the key or press Copy. Search, Active/Expired filter, "Copy shown keys".
+BOT / API CONNECT (Reseller > API & Docs): reseller gives his bot the Server URL (your Render link) + API Token.
+  GET  /api/v1/connect   -> "Connect successful" (connected:true) or "Not connected" (401, connected:false)
+  GET  /api/v1/balance   -> wallet balance
+  GET  /api/v1/products  -> ALL products with plans + the reseller's prices;  ?ids=1,4,7 (or POST {"product_ids":[..]}) -> only selected
+  POST /api/v1/purchase  -> {"plan_id": N} returns the key
+  Token can be sent as X-API-Key, Authorization: Bearer, or ?api_key=. CORS is open for /api/v1 (token based).
+  API & Docs page has: 4-step guide, copy buttons, a Connection tester (Connect / Check balance / Select products), Python helper for bots, cURL.
+RESELLER > SETTINGS (above Logout): change password with current password (or generate a strong one). All other logged-in browsers are logged out,
+  Telegram gets a "PASSWORD CHANGED" alert, optional new API key, 5 wrong tries = 10 min lock. New devices still need admin approval.

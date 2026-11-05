@@ -136,7 +136,6 @@ T["rbase.html"] = HEAD + """Reseller Panel</title><style>""" + CSS2 + """</style
 <a href="/security" class="{{'on' if page=='security'}}">{{ic('shield2')}} Security</a>
 <a href="/broadcast" class="{{'on' if page=='broadcast'}}">{{ic('bell')}} Broadcast{% if unread and page!='broadcast' %}<span class=badge>{{unread}}</span>{% endif %}</a>
 <a href="/api-docs" class="{{'on' if page=='api'}}">{{ic('code')}} API &amp; Docs</a>
-<a href="/settings" class="{{'on' if page=='settings'}}">{{ic('tool')}} Settings</a>
 <a href="/logout">{{ic('logout')}} Logout</a></div>
 <div class="top"><button class="iconbtn" id=bg aria-label="Menu">{{ic('menu',22)}}</button>
 <div class="player" id=pl><button id=pv aria-label="Previous">{{ic('prev',16)}}</button><button id=pp aria-label="Play">{{ic('play',16)}}</button><button id=nx aria-label="Next">{{ic('next',16)}}</button><span id=ttl>…</span><audio id=au preload=auto></audio></div>
@@ -488,47 +487,252 @@ T["admin_backup.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic('sa
 T["admin_music.html"] = T["admin_music.html"].replace("Free Render disk resets on redeploy, so direct URLs are safer than uploads.",
     'Free Render disk resets on redeploy &mdash; take a <a href="/admin/backup">Music Backup</a> after adding songs and upload it again after a redeploy.')
 
-# ---------------------------------------------------------------- v10: Sold Keys page, credit add/deduct, reseller settings
-T["admin_keys.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>Sold Keys</h2>
-<div class=card><input id=ksq placeholder="Search reseller, key, product, date..." autocomplete=off style="width:100%">
-<div class=mu style="margin:8px 0"><span id=kshown>{{rows|length}}</span> of {{rows|length}} newest keys shown</div>
-<button class=g id=kall>{{ic('copy',16)}} Copy all shown keys</button></div>
-<style>.kc{border:1px solid var(--bd);border-radius:16px;padding:14px;margin:10px 0;background:rgba(255,255,255,.03)}
-.kc .t{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap}
-.kc .kb{margin-top:10px;display:flex;gap:8px;align-items:stretch}
-.kc .kv{flex:1;min-width:0;font:600 15px/1.4 ui-monospace,Consolas,monospace;word-break:break-all;overflow-wrap:anywhere;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.35);border:1px solid var(--bd);user-select:all;-webkit-user-select:all}
-.kc .kcp{flex:none;padding:0 14px!important}.kc .m{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:13px}</style>
-<div id=klist>{% for x in rows %}<div class=kc data-s="{{(x.username~' '~x.key~' '~x.product_name~' '~x.plan_name~' '~(x.via or '')~' '~(x.created|dt))|lower}}" data-k="{{x.key}}">
-<div class=t><b style="font-size:16px">{{x.username}}</b><span>{% if x.expires>now %}<span class="pill a">Active</span>{% else %}<span class="pill e">Expired</span>{% endif %}</span></div>
-<div style="margin-top:6px"><b>{{x.product_name}}</b> <span class=mu>&middot; {{x.plan_name}}</span></div>
-<div class=kb><div class=kv>{{x.key}}</div><button class="o kcp" data-kcopy="{{x.key}}" aria-label="Copy key">{{ic('copy',18)}}</button></div>
-<div class="m mu"><span>{{x.price|cur}}</span><span>{{(x.via or 'panel')|upper}}</span><span>{{x.created|dt}}</span></div></div>
-{% else %}<div class=card>No keys sold yet.</div>{% endfor %}</div>
-<script>
-function kcopy(t,b){var done=function(){if(b){var o=b.style.color;b.style.color='#34d399';setTimeout(function(){b.style.color=o},900)}};
- if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done,function(){fb(t);done()})}else{fb(t);done()}}
-function fb(t){var a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity=0;document.body.appendChild(a);a.select();try{document.execCommand('copy')}catch(e){}document.body.removeChild(a)}
-document.addEventListener('click',function(e){var b=e.target.closest('[data-kcopy]');if(b)kcopy(b.dataset.kcopy,b)});
-var ks=document.getElementById('ksq');ks.oninput=function(){var v=ks.value.trim().toLowerCase(),n=0;document.querySelectorAll('#klist .kc').forEach(function(c){var m=!v||c.dataset.s.indexOf(v)>-1;c.style.display=m?'':'none';if(m)n++});document.getElementById('kshown').textContent=n};
-document.getElementById('kall').onclick=function(){var a=[];document.querySelectorAll('#klist .kc').forEach(function(c){if(c.style.display!=='none')a.push(c.dataset.k)});kcopy(a.join('\n'),this)};
+
+# =============================================================== v10: Settings, Sold Keys, API docs
+T["rbase.html"] = T["rbase.html"].replace('<a href="/logout">',
+    '<a href="/settings" class="{{\'on\' if page==\'settings\'}}">{{ic(\'tool\')}} Settings</a>\n<a href="/logout">', 1)
+
+COPY_JS = r"""
+function rgCopy(t){if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(t);
+ return new Promise(function(res){var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;opacity:0;top:0';document.body.appendChild(a);a.focus();a.select();try{document.execCommand('copy')}catch(e){}a.remove();res()})}
+function rgFlash(b,txt){var o=b.dataset.o||b.innerHTML;b.dataset.o=o;b.innerHTML=txt;b.classList.add('done');clearTimeout(b._t);b._t=setTimeout(function(){b.innerHTML=o;b.classList.remove('done')},1200)}
+"""
+
+SK_CSS = r"""
+.skbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0}
+.skbar .sbox{flex:1;min-width:200px;margin:0}
+.chips{display:flex;gap:8px}.chip{padding:8px 14px;border-radius:20px;border:1px solid var(--bd);background:transparent;color:var(--mu);font-weight:700}
+.chip.on{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#fff;border-color:transparent}
+.skg{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:14px}
+.sk{border:1px solid var(--bd);border-radius:18px;background:var(--card);padding:14px;display:flex;flex-direction:column;gap:12px;transition:.2s}
+.sk:hover{border-color:var(--ac);box-shadow:0 0 22px rgba(var(--acrgb),.2)}
+.sk-h{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.sk-r{display:inline-flex;align-items:center;gap:7px;font-weight:800;letter-spacing:.03em}.sk-r .ic{color:var(--ac)}
+.sk-key{display:flex;align-items:stretch;gap:8px}
+.sk-key code{flex:1;min-width:0;display:flex;align-items:center;padding:12px 14px;border-radius:12px;border:1px dashed var(--bd);background:rgba(var(--acrgb),.08);
+ color:var(--acl);font:700 15px/1.35 ui-monospace,Consolas,monospace;letter-spacing:.04em;overflow-wrap:anywhere;word-break:break-all;cursor:pointer;user-select:all}
+.sk-cp{display:inline-flex;align-items:center;gap:6px;padding:0 14px;border-radius:12px;font-weight:800;white-space:nowrap}
+.sk-cp.done{background:var(--ok);border-color:var(--ok);color:#fff}
+.sk-m{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
+.sk-m small{display:block;color:var(--mu);font-size:11px;font-weight:700;letter-spacing:.12em}
+.sk-m b{font-size:14px}.sk-m .pl{color:var(--ac);font-weight:800}
+.sk-m .full{grid-column:1/-1}
+.sk-empty{padding:30px;text-align:center}
+"""
+
+T["admin_keys.html"] = r"""{% extends 'abase.html' %}{% block c %}<style>""" + SK_CSS + r"""</style>
+<h2>{{ic('key',24)}} Sold Keys <span class=mu>({{rows|length}})</span></h2>
+<div class=skbar>
+ <div class=sbox>{{ic('search',20)}}<input id=sq placeholder="Search reseller, key, product..." autocomplete=off></div>
+ <div class=chips><button class="chip on" data-f=all>All</button><button class=chip data-f=a>Active</button><button class=chip data-f=e>Expired</button></div>
+ <button id=cpall class=sk-cp style="padding:9px 14px">{{ic('copy',16)}} Copy shown keys</button>
+</div>
+<div class=skg id=skg>
+{% for x in rows %}{% set act = x.expires>now %}
+<div class=sk data-st="{{'a' if act else 'e'}}" data-k="{{x.key}}" data-s="{{(x.username~' '~x.key~' '~x.product_name~' '~x.plan_name~' '~x.via)|lower}}">
+ <div class=sk-h><span class=sk-r>{{ic('user',16)}} {{x.username}}</span>{% if act %}<span class="pill a">Active</span>{% else %}<span class="pill e">Expired</span>{% endif %}</div>
+ <div class=sk-key><code title="Tap to copy">{{x.key}}</code><button class=sk-cp data-copy-key="{{x.key}}">{{ic('copy',16)}} Copy</button></div>
+ <div class=sk-m>
+  <div class=full><small>PRODUCT / PLAN</small><b>{{x.product_name}}</b> <span class=pl>&middot; {{x.plan_name}}</span></div>
+  <div><small>PRICE</small><b>{{x.price|cur}}</b></div><div><small>VIA</small><b>{{(x.via or 'panel')|upper}}</b></div>
+  <div class=full><small>CREATED</small><b>{{x.created|dt}}</b></div>
+ </div>
+</div>
+{% else %}<div class="card sk-empty mu" style="grid-column:1/-1">No keys sold yet.</div>{% endfor %}
+</div>
+<script>""" + COPY_JS + r"""
+var st='all',cards=[].slice.call(document.querySelectorAll('#skg .sk'));
+function apply(){var v=document.getElementById('sq').value.trim().toLowerCase();cards.forEach(function(c){var ok=(st=='all'||c.dataset.st==st)&&(!v||c.dataset.s.indexOf(v)>=0);c.style.display=ok?'':'none'})}
+document.getElementById('sq').oninput=apply;
+document.querySelectorAll('.chip').forEach(function(b){b.onclick=function(){document.querySelectorAll('.chip').forEach(function(x){x.classList.remove('on')});b.classList.add('on');st=b.dataset.f;apply()}});
+document.getElementById('skg').addEventListener('click',function(e){
+ var b=e.target.closest('[data-copy-key]'),c=e.target.closest('.sk-key code');
+ if(b){rgCopy(b.dataset.copyKey).then(function(){rgFlash(b,'Copied')})}
+ else if(c){var bb=c.parentNode.querySelector('.sk-cp');rgCopy(bb.dataset.copyKey).then(function(){rgFlash(bb,'Copied')})}});
+document.getElementById('cpall').onclick=function(){var t=cards.filter(function(c){return c.style.display!='none'}).map(function(c){return c.dataset.k}).join('\n');var b=this;rgCopy(t).then(function(){rgFlash(b,'Copied')})};
 </script>{% endblock %}"""
 
-T["admin_reseller.html"] = T["admin_reseller.html"].replace(
- """<div class=card><h3>Add / Deduct Credit</h3><form class=row method=post><input type=hidden name=action value=credit><input name=amount type=number step=any placeholder="Amount (negative to deduct)" required><button class=g>Update</button></form></div>""",
- """<div class=card><h3>Add / Deduct Credit</h3><form class=row method=post><input type=hidden name=action value=credit><input name=amount type=number step=any min=0 inputmode=decimal placeholder="Amount ({{CURRENCY}})" required>
-<button class=g name=op value=add>{{ic('plus',16)}} Add</button><button class=r name=op value=deduct onclick="return confirm('Deduct this amount from {{r.username}}?')">&minus; Deduct</button></form>
-<p class=hint>Balance now: <b>{{r.balance|cur}}</b>. Deduct cannot take more than the balance.</p></div>""", 1)
-
 T["settings.html"] = r"""{% extends 'rbase.html' %}{% block c %}
+<style>.pwrow{position:relative;margin:8px 0}.pwrow input{width:100%;padding-right:46px}.pwrow .eye{position:absolute;right:4px;top:50%;margin-top:-17px;width:38px;height:34px;padding:0;background:none;border:0;box-shadow:none;color:var(--mu);display:flex;align-items:center;justify-content:center}
+.sgen{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 12px}.sgen button{display:inline-flex;align-items:center;gap:6px}</style>
 <div class=hd>{{ic('tool',24)}} SETTINGS</div>
 <div class=card><h3>{{ic('lock',20)}} Change password</h3>
-<div class=mu>If you think your password was leaked, change it now. After changing, every other device is logged out.</div>
-<form method=post autocomplete=off style="margin-top:10px"><input type=hidden name=action value=password>
-<p class=mu style="margin:10px 0 4px">Current password</p><input type=password name=old required autocomplete=current-password style="width:100%">
-<p class=mu style="margin:10px 0 4px">New password (min 6 characters)</p><input type=password name=new1 required minlength=6 autocomplete=new-password style="width:100%">
-<p class=mu style="margin:10px 0 4px">New password again</p><input type=password name=new2 required minlength=6 autocomplete=new-password style="width:100%">
-<button class=g style="margin-top:14px">{{ic('save',16)}} Change password</button></form></div>
-<div class=card><h3>{{ic('shield2',20)}} More</h3><div class=mu>Login code, Telegram alerts and your devices are in <a href="/security">Security</a>.</div></div>{% endblock %}"""
+<div class=mu>If your password may have leaked, change it here. After the change every other logged-in browser is logged out. (Even with the password, a new device still needs admin approval.)</div>
+<form method=post autocomplete=off style="margin-top:12px"><input type=hidden name=action value=password>
+<label class=mu>Current password</label><div class=pwrow><input type=password name=current id=pc required autocomplete=current-password><button type=button class=eye data-t=pc aria-label=Show>{{ic('eye',18)}}</button></div>
+<label class=mu>New password (min 6 characters)</label><div class=pwrow><input type=password name=new id=pn minlength=6 required autocomplete=new-password><button type=button class=eye data-t=pn aria-label=Show>{{ic('eye',18)}}</button></div>
+<label class=mu>Confirm new password</label><div class=pwrow><input type=password name=confirm id=pf minlength=6 required autocomplete=new-password><button type=button class=eye data-t=pf aria-label=Show>{{ic('eye',18)}}</button></div>
+<div class=sgen><button type=button class=o id=gen>{{ic('bolt',16)}} Generate strong password</button><button type=button class=o id=cpw>{{ic('copy',16)}} Copy new password</button></div>
+<label class=mu style="display:flex;gap:8px;align-items:center"><input type=checkbox name=newkey value=1 style="width:auto"> Also generate a new API key (old API key stops working)</label>
+<div><button class=g style="margin-top:14px">{{ic('save',16)}} Update password</button></div></form></div>
+<script>""" + COPY_JS + r"""
+document.querySelectorAll('.eye').forEach(function(b){b.onclick=function(){var i=document.getElementById(b.dataset.t);i.type=i.type=='password'?'text':'password'}});
+document.getElementById('gen').onclick=function(){var cs='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789@#$%',a=new Uint32Array(14),o='';crypto.getRandomValues(a);for(var i=0;i<14;i++)o+=cs[a[i]%cs.length];
+ ['pn','pf'].forEach(function(id){var e=document.getElementById(id);e.value=o;e.type='text'})};
+document.getElementById('cpw').onclick=function(){var v=document.getElementById('pn').value;if(v){var b=this;rgCopy(v).then(function(){rgFlash(b,'Copied')})}};
+</script>{% endblock %}"""
+
+API_CSS = r"""
+.dk{border:1px solid var(--bd);border-radius:14px;background:rgba(var(--acrgb),.06);padding:12px 14px;margin:8px 0;display:flex;gap:10px;align-items:center}
+.dk code,.dk pre{flex:1;min-width:0;margin:0;overflow-wrap:anywhere;word-break:break-all;white-space:pre-wrap;color:var(--acl);background:none;border:0;padding:0;font:600 14px/1.4 ui-monospace,Consolas,monospace}
+.dk button{flex:none;display:inline-flex;align-items:center;gap:6px}
+.dk button.done{background:var(--ok);border-color:var(--ok);color:#fff}
+.cb{position:relative;margin:10px 0}.cb pre{margin:0;padding:14px 14px 14px;border-radius:14px;border:1px solid var(--bd);background:rgba(4,8,18,.85);color:#cfe3ff;overflow:auto;font:13px/1.5 ui-monospace,Consolas,monospace;white-space:pre}
+.cb button{position:absolute;top:8px;right:8px;padding:5px 10px;font-size:12px}
+.stp{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.stp div{border:1px solid var(--bd);border-radius:14px;padding:12px;background:rgba(var(--acrgb),.06)}
+.stp b.n{display:inline-flex;width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,var(--ac),var(--ac2));color:#fff;align-items:center;justify-content:center;margin-right:6px}
+.mth{display:inline-block;padding:3px 9px;border-radius:8px;font-weight:800;font-size:12px;margin-right:6px;background:rgba(16,185,129,.2);color:#34d399}.mth.p{background:rgba(59,130,246,.22);color:#93c5fd}
+.res{margin-top:10px;padding:12px 14px;border-radius:14px;font-weight:700;display:none}.res.ok{display:block;background:rgba(16,185,129,.15);border:1px solid #10b981;color:#34d399}.res.no{display:block;background:rgba(244,63,94,.14);border:1px solid #f43f5e;color:#fb7185}
+.pp{border:1px solid var(--bd);border-radius:14px;padding:10px 12px;margin:8px 0;background:var(--card)}
+.pp label.h{display:flex;align-items:center;gap:8px;font-weight:800;cursor:pointer}.pp input[type=checkbox]{width:auto}
+.pp .pls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 0 26px}.pp .pls span{padding:4px 10px;border-radius:9px;border:1px solid var(--bd);font-size:12px;color:var(--mu)}.pp .pls span b{color:var(--acl)}
+.tools{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.tools button{display:inline-flex;align-items:center;gap:6px}
+.tl input{width:100%;margin:6px 0 10px}
+"""
+
+def _cb(code):
+    return '<div class=cb><button class="o" data-cp-next>{{ic(\'copy\',14)}} Copy</button><pre>' + code + '</pre></div>'
+
+T["api.html"] = r"""{% extends 'rbase.html' %}{% block c %}<style>""" + API_CSS + r"""</style>
+<h2>{{ic('code',24)}} API &amp; Docs</h2>
+<div class=card><h3>{{ic('bolt',20)}} Connect your bot in 4 steps</h3>
+<div class=stp>
+<div><b class=n>1</b><b>Connect</b><p class=mu>Enter <b>Server URL</b> + <b>API Token</b> (below) in your bot. The bot calls <code>/api/v1/connect</code>. Success shows <b>Connect successful</b>, otherwise <b>Not connected</b>.</p></div>
+<div><b class=n>2</b><b>Check balance</b><p class=mu>The bot calls <code>/api/v1/balance</code> and shows the wallet balance of this panel account.</p></div>
+<div><b class=n>3</b><b>Select products</b><p class=mu><b>All products</b> or only the ones you tick. Products come with their plans (validity) and <b>your reseller price</b>.</p></div>
+<div><b class=n>4</b><b>Sell</b><p class=mu>When your customer buys, the bot calls <code>/api/v1/purchase</code> with the <code>plan_id</code>. The key is returned instantly.</p></div>
+</div></div>
+
+<div class=card><h3>Your Credentials</h3>
+<p class=mu style="margin:6px 0 0">Server URL (public hosting link)</p><div class=dk><code>{{base}}</code><button class=o data-cp="{{base}}">{{ic('copy',15)}} Copy</button></div>
+<p class=mu style="margin:6px 0 0">API Token</p><div class=dk><code id=tok>{{r.api_key}}</code><button class=o data-cp="{{r.api_key}}">{{ic('copy',15)}} Copy</button></div>
+<div class=mu>Keep the token private. If it leaks, regenerate it &mdash; the old token stops working at once.</div>
+<form method=post onsubmit="return confirm('Old key will stop working. Continue?')" style="margin-top:10px"><button class=r>Regenerate API Key</button></form></div>
+
+<div class="card tl"><h3>{{ic('shield2',20)}} Connection tester</h3>
+<div class=mu>Try exactly what your bot will do. Nothing is bought here.</div>
+<p class=mu style="margin:10px 0 0">Server URL</p><input id=tu value="{{base}}" autocomplete=off>
+<p class=mu style="margin:0">API Token</p><input id=tk value="{{r.api_key}}" autocomplete=off>
+<div class=tools><button class=g id=bc>{{ic('check',16)}} Connect</button><button class=o id=bb>{{ic('wallet',16)}} Check balance</button><button class=o id=bp>{{ic('box',16)}} Select products</button></div>
+<div class=res id=rs></div>
+<div id=pbox style="display:none">
+<div class=tools><button class=o id=pa>Select all</button><button class=o id=pn>Clear</button><button class=g id=pg>{{ic('bolt',16)}} Get selected products</button></div>
+<div id=plist></div>
+<p class=mu id=purl style="word-break:break-all"></p>
+<div class=cb style="display:none" id=jb><button class=o id=jc>{{ic('copy',14)}} Copy</button><pre id=jo style="max-height:320px"></pre></div>
+</div></div>
+
+<div class=card><h3>Authentication</h3><p>Send the token in <b>any one</b> of these ways:</p>
+""" + _cb('X-API-Key: YOUR_API_TOKEN\nAuthorization: Bearer YOUR_API_TOKEN\n?api_key=YOUR_API_TOKEN   (query string)') + r"""
+<p class=mu>Wrong / missing token &rarr; HTTP 401 and <code>"connected": false</code>.</p></div>
+
+<div class=card><h3><span class=mth>GET</span>1. Connect</h3><p>Use this when the reseller presses <b>Connect</b> in the bot.</p>
+""" + _cb('GET {{base}}/api/v1/connect') + _cb('{"success": true, "connected": true, "message": "Connect successful",\n "username": "RPSHIVA", "balance": 250.0, "currency": "INR", "server": "{{base}}"}') + r"""
+<p class=mu>If the token is wrong: <code>{"success": false, "connected": false, "error": "INVALID_API_KEY", "message": "Not connected: ..."}</code></p></div>
+
+<div class=card><h3><span class=mth>GET</span>2. Check Balance</h3>
+""" + _cb('GET {{base}}/api/v1/balance\n\n{"success": true, "username": "RPSHIVA", "balance": 250.0, "currency": "INR"}') + r"""</div>
+
+<div class=card><h3><span class=mth>GET</span>3. Products, Plans &amp; Prices</h3>
+<p>Prices are <b>your</b> prices (custom price if admin set one). All amounts are INR.</p>
+""" + _cb('# all products\nGET {{base}}/api/v1/products\n\n# only selected products (comma separated product_id list)\nGET {{base}}/api/v1/products?ids=1,4,7\n\n# same thing with POST\nPOST {{base}}/api/v1/products\n{"product_ids": [1, 4, 7]}') + _cb('{"success": true, "currency": "INR", "count": 1, "missing_ids": [],\n "products": [{"product_id": 1, "name": "FALCON CHEAT ROOT",\n   "plans": [{"plan_id": 3, "name": "1 Day",  "days": 1, "price": 18.0, "currency": "INR", "available": true},\n             {"plan_id": 4, "name": "7 Days", "days": 7, "price": 50.0, "currency": "INR", "available": true}]}]}') + r"""
+<p class=mu><code>available</code> is <code>false</code> when a plan uses your own key stock and the stock is empty. <code>missing_ids</code> lists product ids you asked for that do not exist.<br>
+Tip: the bot should store <code>product_id</code> and <code>plan_id</code>. To refresh prices / new products call this endpoint again.</p></div>
+
+<div class=card><h3><span class="mth p">POST</span>4. Purchase (Generate Key)</h3>
+""" + _cb('POST {{base}}/api/v1/purchase\nContent-Type: application/json\n\n{"plan_id": 3}') + _cb('{"success": true, "key": "FALCON-A1B2-C3D4-E5F6-7890", "product": "FALCON CHEAT ROOT",\n "plan": "1 Day", "price": 18.0, "expires_at": 1767225600, "balance": 232.0}') + r"""
+<p class=mu>The price is cut from your wallet and returned in <code>balance</code>. If the main provider fails the balance is refunded automatically.</p></div>
+
+<div class=card><h3><span class=mth>GET</span>5. History</h3>
+""" + _cb('GET {{base}}/api/v1/history') + r"""<p class=mu>Returns your last 100 keys.</p></div>
+
+<div class=card><h3>Errors</h3><div class=tw><table><tr><th>HTTP</th><th>error</th><th>Meaning</th></tr>
+<tr><td>401</td><td>INVALID_API_KEY</td><td>Not connected - token wrong or account disabled</td></tr>
+<tr><td>402</td><td>Insufficient balance</td><td>Add balance in the panel</td></tr>
+<tr><td>400</td><td>plan_id required</td><td>Send <code>plan_id</code> in the body</td></tr>
+<tr><td>400</td><td>Plan not found / Out of stock / Account disabled</td><td>Check <code>/products</code></td></tr></table></div></div>
+
+<div class=card><h3>{{ic('code',20)}} Ready-made Python helper (for your bot)</h3>
+<p class=mu>Copy this into your bot. It does Connect &rarr; Balance &rarr; Select products &rarr; Buy.</p>
+""" + _cb('''import requests
+
+class Panel:
+    def __init__(self, server_url, token):
+        self.base = server_url.rstrip("/")
+        self.h = {"X-API-Key": token.strip()}
+
+    def _get(self, path, **params):
+        r = requests.get(self.base + path, headers=self.h, params=params, timeout=30)
+        return r.json()
+
+    def connect(self):                      # -> (True/False, text)
+        try:
+            d = self._get("/api/v1/connect")
+        except Exception as e:
+            return False, "Not connected: %s" % e
+        if d.get("connected"):
+            return True, "Connect successful (%s, balance %s INR)" % (d["username"], d["balance"])
+        return False, "Not connected: %s" % d.get("message", d.get("error"))
+
+    def balance(self):
+        return self._get("/api/v1/balance").get("balance")
+
+    def products(self, ids=None):           # ids=None -> ALL products
+        p = {"ids": ",".join(map(str, ids))} if ids else {}
+        return self._get("/api/v1/products", **p)["products"]
+
+    def buy(self, plan_id):
+        r = requests.post(self.base + "/api/v1/purchase", headers=self.h,
+                          json={"plan_id": plan_id}, timeout=90).json()
+        if not r.get("success"):
+            raise RuntimeError(r.get("error", "failed"))
+        return r["key"]
+
+# ---- usage in your bot ----
+p = Panel("{{base}}", "YOUR_API_TOKEN")
+ok, msg = p.connect()                       # show "Connect successful" or "Not connected"
+print(msg)
+print("Balance:", p.balance())
+for prod in p.products([1, 4]):             # or p.products() for ALL
+    for pl in prod["plans"]:
+        print(prod["product_id"], prod["name"], pl["plan_id"], pl["name"], pl["price"])
+# key = p.buy(3)                            # when your customer pays
+''') + r"""</div>
+
+<div class=card><h3>cURL</h3>
+""" + _cb('curl -H "X-API-Key: YOUR_API_TOKEN" {{base}}/api/v1/connect\ncurl -H "X-API-Key: YOUR_API_TOKEN" "{{base}}/api/v1/products?ids=1,4"\ncurl -X POST -H "X-API-Key: YOUR_API_TOKEN" -H "Content-Type: application/json" -d \'{"plan_id": 3}\' {{base}}/api/v1/purchase') + r"""</div>
+
+<script>""" + COPY_JS + r"""
+document.addEventListener('click',function(e){
+ var b=e.target.closest('[data-cp]');if(b){rgCopy(b.dataset.cp).then(function(){rgFlash(b,'Copied')});return}
+ b=e.target.closest('[data-cp-next]');if(b){rgCopy(b.nextElementSibling.textContent).then(function(){rgFlash(b,'Copied')})}});
+var rs=document.getElementById('rs'),prods=[];
+function say(ok,t){rs.className='res '+(ok?'ok':'no');rs.textContent=t}
+function api(path){var u=document.getElementById('tu').value.trim().replace(/\/+$/,''),k=document.getElementById('tk').value.trim();
+ return fetch(u+path,{headers:{'X-API-Key':k}}).then(function(r){return r.json()})}
+function fail(e){say(false,'Not connected: '+(e&&e.message?e.message:'server not reachable'))}
+document.getElementById('bc').onclick=function(){api('/api/v1/connect').then(function(d){d.connected?say(true,'\u2705 Connect successful \u2014 '+d.username+' \u00b7 balance \u20b9'+d.balance):say(false,'\u274c Not connected \u2014 '+(d.message||d.error))}).catch(fail)};
+document.getElementById('bb').onclick=function(){api('/api/v1/balance').then(function(d){d.success?say(true,'\u2705 Balance: \u20b9'+d.balance+' ('+d.username+')'):say(false,'\u274c '+(d.message||d.error))}).catch(fail)};
+document.getElementById('bp').onclick=function(){api('/api/v1/products').then(function(d){
+ if(!d.success){say(false,'\u274c '+(d.message||d.error));return}
+ prods=d.products;say(true,'\u2705 '+prods.length+' products found. Tick the ones you want.');
+ var box=document.getElementById('plist');box.innerHTML='';
+ prods.forEach(function(p){var w=document.createElement('div');w.className='pp';
+  var l=document.createElement('label');l.className='h';var c=document.createElement('input');c.type='checkbox';c.value=p.product_id;c.checked=true;l.appendChild(c);
+  l.appendChild(document.createTextNode(p.name+'  (ID '+p.product_id+')'));w.appendChild(l);
+  var s=document.createElement('div');s.className='pls';
+  p.plans.forEach(function(x){var i=document.createElement('span');i.innerHTML='<b></b> ';i.firstChild.textContent=x.name;i.appendChild(document.createTextNode('\u20b9'+x.price+' \u00b7 plan '+x.plan_id+(x.available?'':' \u00b7 out of stock')));s.appendChild(i)});
+  w.appendChild(s);box.appendChild(w)});
+ document.getElementById('pbox').style.display='block'}).catch(fail)};
+function sel(v){document.querySelectorAll('#plist input').forEach(function(c){c.checked=v})}
+document.getElementById('pa').onclick=function(){sel(true)};document.getElementById('pn').onclick=function(){sel(false)};
+document.getElementById('pg').onclick=function(){var ids=[].slice.call(document.querySelectorAll('#plist input:checked')).map(function(c){return c.value});
+ if(!ids.length){say(false,'Select at least one product');return}
+ var path='/api/v1/products'+(ids.length==prods.length?'':'?ids='+ids.join(','));
+ document.getElementById('purl').textContent='Your bot calls: GET '+document.getElementById('tu').value.trim().replace(/\/+$/,'')+path;
+ api(path).then(function(d){document.getElementById('jo').textContent=JSON.stringify(d,null,2);document.getElementById('jb').style.display='block';say(true,'\u2705 '+d.count+' product(s) with plans and prices selected')}).catch(fail)};
+document.getElementById('jc').onclick=function(){var b=this;rgCopy(document.getElementById('jo').textContent).then(function(){rgFlash(b,'Copied')})};
+</script>{% endblock %}"""
 
 TEMPLATES = T
-

@@ -101,7 +101,7 @@ def init_db():
     rcols = [r[1] for r in c.execute("PRAGMA table_info(resellers)")]
     for col, ddl in (("theme", "TEXT DEFAULT ''"), ("tg_chat", "TEXT DEFAULT ''"),
                      ("otp_on", "INTEGER NOT NULL DEFAULT 1"), ("notify", "INTEGER NOT NULL DEFAULT 1"),
-                     ("low_bal", "REAL NOT NULL DEFAULT 50"), ("pwv", "INTEGER NOT NULL DEFAULT 0")):
+                     ("low_bal", "REAL NOT NULL DEFAULT 50")):
         if col not in rcols:
             c.execute("ALTER TABLE resellers ADD COLUMN %s %s" % (col, ddl))
     c.commit()
@@ -509,7 +509,7 @@ def reseller_required(f):
         if not r or not r["active"]:
             session.clear()
             return redirect("/login")
-        if session.get("pwv", 0) != r["pwv"]:              # password was changed elsewhere -> login again
+        if session.get("pwh") and session["pwh"] != pw_fp(r):     # password was changed elsewhere
             session.clear()
             return redirect("/login")
         if dev_check_on() and not device_ok(r["id"]):      # this browser is not an approved device
@@ -790,11 +790,15 @@ def ask_admin_approval(r, dev):
     return did
 
 
+def pw_fp(r):
+    return hashlib.sha256((r["pw"] + app.secret_key).encode()).hexdigest()[:16]
+
+
 def finish_login(r, dev, alert=False):
     """Final step: the browser becomes logged in. Returns the URL to go to."""
     session.clear()
     session["rid"] = r["id"]
-    session["pwv"] = r["pwv"]
+    session["pwh"] = pw_fp(r)
     q("UPDATE devices SET last_seen=? WHERE reseller_id=? AND dev_id=?", (int(time.time()), r["id"], dev), commit=True)
     if alert and r["tg_chat"] and r["notify"]:
         bot.send(r["tg_chat"], "<blockquote>\U0001F513 <b>NEW LOGIN</b></blockquote>\n\U0001F4F1 %s\n"
@@ -1036,38 +1040,47 @@ def set_theme():
     return resp
 
 
-# ---- settings (reseller): change own password
+# ---- security (reseller)
 @app.route("/settings", methods=["GET", "POST"])
 @reseller_required
 def settings():
     r = request.r
-    if request.method == "POST" and request.form.get("action") == "password":
-        old, n1, n2 = request.form.get("old", ""), request.form.get("new1", ""), request.form.get("new2", "")
-        if rl_blocked("pwchg:%d" % r["id"], 5, 600):
-            flash("Too many wrong attempts. Wait 10 minutes.", "err")
-        elif not (check_password_hash(r["pw"], old) or check_password_hash(r["pw"], old.strip())):
-            rl_hit("pwchg:%d" % r["id"])
+    if request.method == "POST":
+        key = "pw:%d" % r["id"]
+        cur = request.form.get("current", "")
+        new = request.form.get("new", "").strip()
+        con = request.form.get("confirm", "").strip()
+        if rl_blocked(key, 5, 600):
+            flash("Too many wrong attempts. Try again in 10 minutes.", "err")
+        elif not (check_password_hash(r["pw"], cur) or check_password_hash(r["pw"], cur.strip())):
+            rl_hit(key)
             flash("Current password is wrong", "err")
-        elif len(n1.strip()) < 6:
+        elif len(new) < 6:
             flash("New password must be at least 6 characters", "err")
-        elif n1 != n2:
-            flash("The two new passwords do not match", "err")
-        elif check_password_hash(r["pw"], n1) or check_password_hash(r["pw"], n1.strip()):
-            flash("New password must be different from the old one", "err")
+        elif new != con:
+            flash("New password and confirm password do not match", "err")
+        elif check_password_hash(r["pw"], new):
+            flash("New password must be different from the current one", "err")
         else:
-            q("UPDATE resellers SET pw=?, pwv=pwv+1 WHERE id=?", (generate_password_hash(n1.strip()), r["id"]), commit=True)
-            session["pwv"] = r["pwv"] + 1                       # this browser stays logged in, all others are logged out
-            if r["tg_chat"] and r["notify"]:
-                bot.send(r["tg_chat"], "<blockquote>\U0001F510 <b>PASSWORD CHANGED</b></blockquote>\n"
-                         "Your %s password was just changed.\n\U0001F552 %s\n\U0001F310 IP: <code>%s</code>\n"
-                         "If this was not you, contact the admin now." % (esc(BRAND), fmt(time.time()), esc(request.remote_addr)),
-                         what="password changed (%s)" % r["username"])
-            flash("Password changed. Use the new password next time you log in.", "ok")
+            q("UPDATE resellers SET pw=? WHERE id=?", (generate_password_hash(new), r["id"]), commit=True)
+            extra = ""
+            if request.form.get("newkey"):
+                q("UPDATE resellers SET api_key=? WHERE id=?", (new_api_key(), r["id"]), commit=True)
+                extra = " A new API key was generated too (old key stopped working)."
+            r2 = q("SELECT * FROM resellers WHERE id=?", (r["id"],), one=True)
+            session["pwh"] = pw_fp(r2)            # this browser stays logged in, all other browsers are logged out
+            try:
+                if r2["tg_chat"] and r2["notify"]:
+                    bot.send(r2["tg_chat"], "<blockquote>\U0001F511 <b>PASSWORD CHANGED</b></blockquote>\n"
+                             "\U0001F310 IP: <code>%s</code>\n\U0001F552 %s\n\nIf this was not you, contact admin at once."
+                             % (esc(request.remote_addr), fmt(time.time())))
+            except Exception:
+                pass
+            flash("Password changed. Other logged-in browsers were logged out." + extra, "ok")
         return redirect("/settings")
     return render_template("settings.html", r=r, page="settings")
 
 
-# ---- security (reseller)
 @app.route("/security", methods=["GET", "POST"])
 @reseller_required
 def security():
@@ -1217,8 +1230,26 @@ def media(name):
 
 
 # ---------------------------------------------------------------- reseller API
+def api_token():
+    """Token can come as X-API-Key header, Authorization: Bearer, ?api_key= / ?token= or in the body."""
+    k = request.headers.get("X-API-Key") or ""
+    if not k:
+        a = request.headers.get("Authorization", "")
+        if a.lower().startswith("bearer "):
+            k = a[7:]
+    if not k:
+        k = request.args.get("api_key") or request.args.get("token") or ""
+    if not k:
+        d = request.get_json(silent=True)
+        if isinstance(d, dict):
+            k = str(d.get("api_key") or d.get("token") or "")
+        elif request.form:
+            k = request.form.get("api_key") or request.form.get("token") or ""
+    return k.strip()
+
+
 def api_auth():
-    k = request.headers.get("X-API-Key") or request.args.get("api_key") or ""
+    k = api_token()
     r = q("SELECT * FROM resellers WHERE api_key=?", (k,), one=True) if k else None
     if not r or not r["active"]:
         return None
@@ -1232,10 +1263,21 @@ def api_guard(f):
     def w(*a, **k):
         r = api_auth()
         if not r:
-            return jsonify(success=False, error="INVALID_API_KEY"), 401
+            return jsonify(success=False, connected=False, error="INVALID_API_KEY",
+                           message="Not connected: API token is wrong, missing or the account is disabled."), 401
         request.r = r
         return f(*a, **k)
     return w
+
+
+@app.after_request
+def api_cors(resp):
+    if request.path.startswith("/api/v1/"):
+        resp.headers["Access-Control-Allow-Origin"] = "*"      # token based (no cookies) so this is safe
+        resp.headers["Access-Control-Allow-Headers"] = "X-API-Key, Authorization, Content-Type"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/v1/health")
@@ -1243,19 +1285,57 @@ def api_health():
     return jsonify(success=True, status="online")
 
 
+@app.route("/api/v1/connect", methods=["GET", "POST"])
+@api_guard
+def api_connect():
+    """Used by a bot when the reseller enters Server URL + API token: 'Connect successful' / 'Not connected'."""
+    r = request.r
+    return jsonify(success=True, connected=True, message="Connect successful",
+                   username=r["username"], balance=r["balance"], currency="INR",
+                   server=request.host_url.rstrip("/"))
+
+
 @app.route("/api/v1/balance")
 @api_guard
 def api_balance():
-    return jsonify(success=True, username=request.r["username"], balance=request.r["balance"])
+    return jsonify(success=True, username=request.r["username"], balance=request.r["balance"], currency="INR")
 
 
-@app.route("/api/v1/products")
+def _id_list(raw):
+    out = []
+    if isinstance(raw, (list, tuple)):
+        parts = raw
+    else:
+        parts = re.split(r"[,\s]+", str(raw or ""))
+    for x in parts:
+        try:
+            out.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+@app.route("/api/v1/products", methods=["GET", "POST"])
 @api_guard
 def api_products():
-    return jsonify(success=True, products=[
+    """All products (default) or only the selected ones: ?ids=1,2,3  (or POST {"product_ids":[1,2,3]})."""
+    raw = request.args.get("ids") or request.args.get("product_ids")
+    body = request.get_json(silent=True) if request.method == "POST" else None
+    if raw is None and isinstance(body, dict):
+        raw = body.get("product_ids") or body.get("ids")
+    want = _id_list(raw)
+    cat = catalog(request.r["id"])
+    missing = []
+    if want and not str(request.args.get("all", "")).lower() in ("1", "true", "yes"):
+        have = {p["id"] for p in cat}
+        missing = [i for i in want if i not in have]
+        cat = [p for p in cat if p["id"] in want]
+    return jsonify(success=True, currency="INR", count=len(cat), missing_ids=missing, products=[
         dict(product_id=p["id"], name=p["name"],
-             plans=[dict(plan_id=x["id"], name=x["name"], days=x["days"], price=x["price"]) for x in p["plans"]])
-        for p in catalog(request.r["id"])])
+             plans=[dict(plan_id=x["id"], name=x["name"], days=x["days"], price=x["price"],
+                         currency="INR", available=(x["stock"] > 0 if x["mode"] == "stock" else True))
+                    for x in p["plans"]])
+        for p in cat])
 
 
 @app.route("/api/v1/purchase", methods=["POST"])
@@ -1399,7 +1479,7 @@ def admin_plan_api(pid):
 @app.route("/admin/keys")
 @admin_required
 def admin_keys():
-    rows = q("SELECT k.*, r.username FROM license_keys k JOIN resellers r ON r.id=k.reseller_id ORDER BY k.id DESC LIMIT 1000")
+    rows = q("SELECT k.*, r.username FROM license_keys k JOIN resellers r ON r.id=k.reseller_id ORDER BY k.id DESC LIMIT 500")
     return render_template("admin_keys.html", rows=rows, now=int(time.time()), page="keys")
 
 
@@ -1455,22 +1535,10 @@ def admin_reseller(rid):
     if request.method == "POST":
         a = request.form.get("action")
         if a == "credit":
-            amt, op = num(request.form.get("amount")), request.form.get("op", "")
-            if op in ("add", "deduct"):
-                amt = abs(amt)
-                if amt <= 0:
-                    flash("Enter an amount greater than 0", "err")
-                elif op == "deduct" and amt > (r["balance"] or 0) + 1e-9:
-                    flash("Cannot deduct %s - balance is only %s" % (money_txt(amt), money_txt(r["balance"])), "err")
-                else:
-                    q("UPDATE resellers SET balance=balance+? WHERE id=?", (amt if op == "add" else -amt, rid), commit=True)
-                    flash("%s %s %s %s" % ("Added" if op == "add" else "Deducted", money_txt(amt),
-                                           "to" if op == "add" else "from", r["username"]), "ok")
-            else:                                          # old behaviour: signed number
-                q("UPDATE resellers SET balance=balance+? WHERE id=?", (amt, rid), commit=True)
-                flash("Credit updated", "ok")
+            q("UPDATE resellers SET balance=balance+? WHERE id=?", (num(request.form.get("amount")), rid), commit=True)
+            flash("Credit updated (use negative number to deduct)", "ok")
         elif a == "password" and request.form.get("password", "").strip():
-            q("UPDATE resellers SET pw=?, pwv=pwv+1 WHERE id=?", (generate_password_hash(request.form["password"].strip()), rid), commit=True)
+            q("UPDATE resellers SET pw=? WHERE id=?", (generate_password_hash(request.form["password"].strip()), rid), commit=True)
             flash("Password changed", "ok")
         elif a == "toggle":
             q("UPDATE resellers SET active=1-active WHERE id=?", (rid,), commit=True)
