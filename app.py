@@ -1,4 +1,4 @@
-import os, re, json, sqlite3, secrets, time, threading
+import os, re, json, sqlite3, secrets, time, threading, base64
 import requests
 from flask import (Flask, request, session, redirect, render_template, flash,
                    jsonify, send_from_directory, abort, Response)
@@ -67,6 +67,15 @@ def init_db():
       plan_id INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
       key TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, used_by TEXT, used_at INTEGER, created INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
+    CREATE TABLE IF NOT EXISTS topups(id INTEGER PRIMARY KEY,
+      reseller_id INTEGER NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
+      amount REAL NOT NULL, order_id TEXT, qr_url TEXT, upi_id TEXT, status TEXT NOT NULL DEFAULT 'pending',
+      utr TEXT, created INTEGER NOT NULL, expires INTEGER, deadline INTEGER NOT NULL, paid_at INTEGER,
+      last_check INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS broadcasts(id INTEGER PRIMARY KEY, reseller_id INTEGER,
+      title TEXT, body TEXT NOT NULL, created INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS broadcast_reads(broadcast_id INTEGER NOT NULL, reseller_id INTEGER NOT NULL,
+      PRIMARY KEY(broadcast_id, reseller_id));
     """)
     cols = [r[1] for r in c.execute("PRAGMA table_info(plans)")]
     for col, ddl in (("mode", "TEXT DEFAULT 'random'"), ("ext_url", "TEXT DEFAULT ''"),
@@ -75,6 +84,8 @@ def init_db():
                      ("prov_pid", "INTEGER")):
         if col not in cols:
             c.execute("ALTER TABLE plans ADD COLUMN %s %s" % (col, ddl))
+    if "theme" not in [r[1] for r in c.execute("PRAGMA table_info(resellers)")]:
+        c.execute("ALTER TABLE resellers ADD COLUMN theme TEXT DEFAULT ''")
     c.commit()
     c.close()
 
@@ -92,6 +103,7 @@ def fmt(ts):
 
 
 app.jinja_env.filters["dt"] = fmt
+app.jinja_env.filters["dt2"] = lambda ts: time.strftime("%d/%m/%y %I:%M %p", time.gmtime(ts + TZ_OFFSET))
 app.jinja_env.filters["money"] = lambda v: ("%.2f" % float(v)).rstrip("0").rstrip(".") if v is not None else "0"
 
 
@@ -100,7 +112,7 @@ def _cur(v):
 
 
 app.jinja_env.filters["cur"] = _cur
-app.jinja_env.globals.update(BRAND=BRAND, year=time.gmtime().tm_year)
+app.jinja_env.globals.update(BRAND=BRAND, year=time.gmtime().tm_year, CURRENCY=CURRENCY)
 
 
 def plan_label(days):
@@ -321,6 +333,136 @@ def buy(rid, plan_id, via="panel"):
     return dict(key=key, price=price, expires=exp, balance=bal, product=pl["pname"], plan=pl["name"])
 
 
+# ---- payment gateway (FamPay style: /api/create_order.php + /api/verify.php)
+WALLET_AMOUNTS = [200, 500, 1000, 1500, 2000, 2500]   # INR, fixed list (no custom amount)
+DEFAULT_GW_BASE = "https://fampaygateway.site"
+
+
+def gw_base():
+    return (get_setting("gw_base") or DEFAULT_GW_BASE).rstrip("/")
+
+
+def gw_abs(u):
+    u = str(u or "")
+    return gw_base() + u if u.startswith("/") else u
+
+
+def gw_get(path, **params):
+    key = get_setting("gw_key")
+    if not key:
+        raise ValueError("Payment gateway is not set up (Admin > Gateway)")
+    params["api_key"] = key
+    r = requests.get(gw_base() + path, params=params, timeout=20)
+    try:
+        return r.json()
+    except ValueError:
+        raise ValueError("Gateway HTTP %s (not JSON)" % r.status_code)
+
+
+def gw_create(amount):
+    j = gw_get("/api/create_order.php", amount=int(amount))
+    d = j.get("data") if isinstance(j, dict) else None
+    if not isinstance(j, dict) or j.get("status") != "success" or not isinstance(d, dict) \
+            or not d.get("order_id") or not d.get("qr_url"):
+        msg = (j.get("message") or j.get("error") or "Gateway error") if isinstance(j, dict) else "Gateway error"
+        raise ValueError(str(msg)[:120])
+    return d
+
+
+def gw_verify(order_id):
+    """Returns the payment data dict only when the gateway confirms a paid order (has a UTR)."""
+    try:
+        j = gw_get("/api/verify.php", order_id=order_id)
+    except Exception:
+        return None
+    d = j.get("data") if isinstance(j, dict) else None
+    if isinstance(j, dict) and j.get("status") == "success" and isinstance(d, dict) and d.get("utr"):
+        return d
+    return None
+
+
+def parse_iso(v):
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(str(v)).timestamp())
+    except Exception:
+        return 0
+
+
+def credit_topup(tid, d):
+    """Add the money exactly once (safe even if several workers verify the same order)."""
+    c = sqlite3.connect(DB, timeout=20, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        t = c.execute("SELECT * FROM topups WHERE id=?", (tid,)).fetchone()
+        utr = str(d.get("utr"))
+        done = (not t or t["status"] == "paid"
+                or c.execute("SELECT 1 FROM topups WHERE utr=? AND id!=?", (utr, tid)).fetchone())
+        try:
+            paid_amt = float(d.get("amount") or t["amount"])
+        except Exception:
+            paid_amt = t["amount"] if t else 0
+        if done or paid_amt + 0.001 < t["amount"]:
+            c.execute("COMMIT")
+            return False
+        c.execute("UPDATE topups SET status='paid', utr=?, paid_at=? WHERE id=?", (utr, int(time.time()), tid))
+        c.execute("UPDATE resellers SET balance=balance+? WHERE id=?", (t["amount"], t["reseller_id"]))
+        c.execute("COMMIT")
+        return True
+    except Exception:
+        try:
+            c.execute("ROLLBACK")
+        except Exception:
+            pass
+        return False
+    finally:
+        c.close()
+
+
+def check_topup(t):
+    """Verify one top-up with the gateway; returns its status (pending / paid / expired)."""
+    if t["status"] == "paid":
+        return "paid"
+    now = int(time.time())
+    if t["status"] == "pending" and now > t["deadline"]:
+        q("UPDATE topups SET status='expired' WHERE id=? AND status='pending'", (t["id"],), commit=True)
+    elif t["status"] == "expired" and now - t["created"] > 3600:
+        return "expired"
+    q("UPDATE topups SET last_check=? WHERE id=?", (now, t["id"]), commit=True)
+    d = gw_verify(t["order_id"])
+    if d and credit_topup(t["id"], d):
+        return "paid"
+    return q("SELECT status FROM topups WHERE id=?", (t["id"],), one=True)["status"]
+
+
+def topup_worker():
+    """Keeps verifying pending payments for 5 minutes even if the customer left the page."""
+    while True:
+        try:
+            now = int(time.time())
+            for t in q("SELECT * FROM topups WHERE status='pending'"):
+                if now > t["deadline"]:
+                    q("UPDATE topups SET status='expired' WHERE id=? AND status='pending'", (t["id"],), commit=True)
+                elif now - (t["last_check"] or 0) >= 5:
+                    check_topup(t)
+        except Exception:
+            pass
+        time.sleep(4)
+
+
+@app.context_processor
+def inject_unread():
+    rid = session.get("rid")
+    if not rid:
+        return {}
+    n = q("SELECT COUNT(*) FROM broadcasts b WHERE (b.reseller_id IS NULL OR b.reseller_id=?) "
+          "AND b.created>=(SELECT created FROM resellers WHERE id=?) "
+          "AND NOT EXISTS(SELECT 1 FROM broadcast_reads x WHERE x.broadcast_id=b.id AND x.reseller_id=?)",
+          (rid, rid, rid), one=True)[0]
+    return dict(unread=n)
+
+
 def reseller_required(f):
     from functools import wraps
 
@@ -383,7 +525,10 @@ def do_login():
                     break
                 session.clear()
                 session["rid"] = r["id"]
-                return redirect("/dashboard")
+                resp = redirect("/dashboard")
+                if r["theme"]:
+                    resp.set_cookie("rg_theme", r["theme"][1:], max_age=31536000, samesite="Lax")
+                return resp
         else:
             flash("Invalid username or password", "err")
     return render_template("login.html", title="Login", action=request.path)
@@ -421,25 +566,143 @@ def dashboard():
     return render_template("dashboard.html", r=request.r, st=stats, recent=recent, page="dashboard")
 
 
-@app.route("/generate", methods=["GET", "POST"])
+@app.route("/generate")
 @reseller_required
 def generate():
-    if request.method == "POST":
-        try:
-            res = buy(request.r["id"], int(request.form.get("plan_id", 0)))
-            flash("Purchased %s - %s | Key: %s | Expires: %s | Balance: %s" % (
-                res["product"], res["plan"], res["key"], fmt(res["expires"]), res["balance"]), "ok")
-        except Exception as e:
-            flash(str(e), "err")
-        return redirect("/generate")
-    return render_template("generate.html", r=request.r, cat=catalog(request.r["id"]), page="generate")
+    cat = [p for p in catalog(request.r["id"]) if p["plans"]]
+    return render_template("generate.html", r=request.r, cat=cat, page="generate")
+
+
+@app.route("/generate/one", methods=["POST"])
+@reseller_required
+def generate_one():
+    try:
+        res = buy(request.r["id"], int(request.form.get("plan_id", 0)))
+        return jsonify(ok=True, key=res["key"], balance=res["balance"])
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
+
+
+PRESETS = [10, 20, 30, 50, 70, 100, 200, 300, 500, 1000, 2000, 5000, 10000]
 
 
 @app.route("/history")
 @reseller_required
 def history():
-    rows = q("SELECT * FROM license_keys WHERE reseller_id=? ORDER BY id DESC LIMIT 500", (request.r["id"],))
-    return render_template("history.html", r=request.r, rows=rows, now=int(time.time()), page="history")
+    rid = request.r["id"]
+    rows = q("SELECT * FROM license_keys WHERE reseller_id=? ORDER BY id DESC LIMIT 5000", (rid,))
+    total = q("SELECT COUNT(*) FROM license_keys WHERE reseller_id=?", (rid,), one=True)[0]
+    return render_template("history.html", r=request.r, rows=rows, total=total,
+                           opts=[n for n in PRESETS if n < total], page="history")
+
+
+@app.route("/history/plain")
+@reseller_required
+def history_plain():
+    n, s_ = int(num(request.args.get("n"), 0)), request.args.get("q", "").strip().lower()
+    rows = q("SELECT key, product_name FROM license_keys WHERE reseller_id=? ORDER BY id DESC", (request.r["id"],))
+    keys = [x["key"] for x in rows if not s_ or s_ in (x["key"] + " " + (x["product_name"] or "")).lower()]
+    if n > 0:
+        keys = keys[:n]
+    return jsonify(count=len(keys), text="\n".join(keys))
+
+
+@app.route("/theme", methods=["POST"])
+@reseller_required
+def set_theme():
+    c = request.form.get("color", "").strip().lower()
+    if not re.match(r"^#[0-9a-f]{6}$", c):
+        return jsonify(ok=False), 400
+    q("UPDATE resellers SET theme=? WHERE id=?", (c, request.r["id"]), commit=True)
+    resp = jsonify(ok=True)
+    resp.set_cookie("rg_theme", c[1:], max_age=31536000, samesite="Lax")
+    return resp
+
+
+# ---- wallet (UPI top-up)
+def my_topup(tid):
+    return q("SELECT * FROM topups WHERE id=? AND reseller_id=?", (tid, request.r["id"]), one=True) or abort(404)
+
+
+@app.route("/wallet")
+@reseller_required
+def wallet():
+    tops = q("SELECT * FROM topups WHERE reseller_id=? ORDER BY id DESC LIMIT 8", (request.r["id"],))
+    return render_template("wallet.html", r=request.r, amts=WALLET_AMOUNTS, tops=tops,
+                           ready=bool(get_setting("gw_key")), page="wallet")
+
+
+@app.route("/wallet/create", methods=["POST"])
+@reseller_required
+def wallet_create():
+    rid, now = request.r["id"], int(time.time())
+    amt = int(num(request.form.get("amount")))
+    if amt not in WALLET_AMOUNTS:
+        flash("Please choose one of the listed amounts", "err")
+        return redirect("/wallet")
+    ex = q("SELECT id FROM topups WHERE reseller_id=? AND amount=? AND status='pending' AND deadline>? ORDER BY id DESC",
+           (rid, amt, now), one=True)
+    if ex:
+        return redirect("/wallet/pay/%d" % ex["id"])
+    if q("SELECT COUNT(*) FROM topups WHERE reseller_id=? AND status='pending' AND deadline>?", (rid, now), one=True)[0] >= 5:
+        flash("Too many pending payments. Please wait a few minutes.", "err")
+        return redirect("/wallet")
+    try:
+        d = gw_create(amt)
+    except Exception as e:
+        flash("Could not create the QR: %s" % e, "err")
+        return redirect("/wallet")
+    exp = parse_iso(d.get("expires_at"))
+    tid = q("INSERT INTO topups(reseller_id,amount,order_id,qr_url,upi_id,status,created,expires,deadline) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (rid, amt, str(d["order_id"]), gw_abs(d["qr_url"]), str(d.get("upi_id") or ""), "pending", now,
+             exp or now + 300, min(max(now + 300, exp), now + 1800)), commit=True)
+    return redirect("/wallet/pay/%d" % tid)
+
+
+@app.route("/wallet/pay/<int:tid>")
+@reseller_required
+def wallet_pay(tid):
+    check_topup(my_topup(tid))
+    t = my_topup(tid)
+    r = q("SELECT * FROM resellers WHERE id=?", (request.r["id"],), one=True)
+    return render_template("wallet_pay.html", r=r, t=t, left=max(int(t["deadline"] - time.time()), 0), page="wallet")
+
+
+@app.route("/wallet/status/<int:tid>")
+@reseller_required
+def wallet_status(tid):
+    st = check_topup(my_topup(tid))
+    return jsonify(status=st, balance=q("SELECT balance FROM resellers WHERE id=?", (request.r["id"],), one=True)[0])
+
+
+@app.route("/wallet/qr/<int:tid>")
+@reseller_required
+def wallet_qr(tid):
+    t = my_topup(tid)
+    if not (t["qr_url"] or "").startswith(gw_base()):
+        abort(404)
+    try:
+        r = requests.get(t["qr_url"], timeout=20)
+        r.raise_for_status()
+    except Exception:
+        abort(502)
+    return Response(r.content, mimetype=r.headers.get("Content-Type", "image/png"),
+                    headers={"Content-Disposition": 'attachment; filename="%s.png"' % re.sub(r"\W", "", t["order_id"] or "qr")})
+
+
+@app.route("/broadcast")
+@reseller_required
+def broadcast():
+    rid = request.r["id"]
+    rows = q("SELECT b.*, EXISTS(SELECT 1 FROM broadcast_reads x WHERE x.broadcast_id=b.id AND x.reseller_id=?) rd "
+             "FROM broadcasts b WHERE (b.reseller_id IS NULL OR b.reseller_id=?) AND b.created>=? "
+             "ORDER BY b.id DESC LIMIT 100", (rid, rid, request.r["created"]))
+    html = render_template("broadcast.html", r=request.r, rows=rows, page="broadcast")
+    for x in rows:
+        if not x["rd"]:
+            q("INSERT OR IGNORE INTO broadcast_reads(broadcast_id,reseller_id) VALUES(?,?)", (x["id"], rid), commit=True)
+    return html
 
 
 @app.route("/api-docs", methods=["GET", "POST"])
@@ -705,6 +968,57 @@ def admin_reseller(rid):
     return render_template("admin_reseller.html", r=r, cat=cat, page="resellers")
 
 
+@app.route("/admin/gateway", methods=["GET", "POST"])
+@admin_required
+def admin_gateway():
+    test = None
+    if request.method == "POST":
+        f = request.form
+        if f.get("action") == "save":
+            base = f.get("base", "").strip().rstrip("/")
+            if not re.match(r"^https?://", base):
+                flash("Gateway URL must start with http:// or https://", "err")
+                return redirect("/admin/gateway")
+            set_setting("gw_base", base)
+            set_setting("gw_upi", f.get("upi", "").strip())
+            if f.get("token", "").strip():
+                set_setting("gw_key", f["token"].strip())
+            flash("Gateway settings saved", "ok")
+            return redirect("/admin/gateway")
+        try:                                   # test: Rs.1 order, never credited to anybody
+            d = gw_create(1)
+            test = dict(ok=True, qr=gw_abs(d["qr_url"]), order=d["order_id"], upi=d.get("upi_id"))
+        except Exception as e:
+            test = dict(ok=False, msg=str(e))
+    key = get_setting("gw_key")
+    tops = q("SELECT t.*, r.username FROM topups t JOIN resellers r ON r.id=t.reseller_id ORDER BY t.id DESC LIMIT 20")
+    return render_template("admin_gateway.html", base=gw_base(), upi=get_setting("gw_upi"),
+                           tail=key[-4:] if key else "", test=test, tops=tops, page="gateway")
+
+
+@app.route("/admin/broadcast", methods=["GET", "POST"])
+@admin_required
+def admin_broadcast():
+    if request.method == "POST":
+        f = request.form
+        if f.get("action") == "delete":
+            bid = int(num(f.get("id")))
+            q("DELETE FROM broadcasts WHERE id=?", (bid,), commit=True)
+            q("DELETE FROM broadcast_reads WHERE broadcast_id=?", (bid,), commit=True)
+        elif not f.get("body", "").strip():
+            flash("Write a message first", "err")
+        else:
+            tgt = f.get("target", "all")
+            rid = None if tgt == "all" else int(num(tgt))
+            q("INSERT INTO broadcasts(reseller_id,title,body,created) VALUES(?,?,?,?)",
+              (rid, f.get("title", "").strip(), f["body"].strip(), int(time.time())), commit=True)
+            flash("Broadcast sent to %s" % ("all resellers" if rid is None else "1 reseller"), "ok")
+        return redirect("/admin/broadcast")
+    rows = q("SELECT b.*, r.username FROM broadcasts b LEFT JOIN resellers r ON r.id=b.reseller_id ORDER BY b.id DESC LIMIT 50")
+    return render_template("admin_broadcast.html", rows=rows, rs=q("SELECT id, username FROM resellers ORDER BY username"),
+                           page="broadcast")
+
+
 @app.route("/admin/music", methods=["GET", "POST"])
 @admin_required
 def admin_music():
@@ -838,7 +1152,8 @@ def admin_main_api_products():
 
 
 # ---------------------------------------------------------------- admin: backup / restore
-BACKUP_TABLES = ["products", "plans", "resellers", "custom_prices", "license_keys", "music", "stock", "settings"]
+BACKUP_TABLES = ["products", "plans", "resellers", "custom_prices", "license_keys", "music", "stock", "settings",
+                 "topups", "broadcasts", "broadcast_reads"]
 
 
 @app.route("/admin/backup")
@@ -854,6 +1169,14 @@ def admin_backup_download():
     out = dict(app="reseller-panel", version=1, created=int(time.time()), tables={})
     for t in BACKUP_TABLES:
         out["tables"][t] = [dict(r) for r in q("SELECT * FROM %s" % t)]
+    out["music_files"] = {}            # uploaded songs are stored inside the backup too
+    for m in out["tables"]["music"]:
+        if (m.get("url") or "").startswith("/media/"):
+            try:
+                with open(os.path.join(MUSIC_DIR, os.path.basename(m["url"])), "rb") as fh:
+                    out["music_files"][os.path.basename(m["url"])] = base64.b64encode(fh.read()).decode()
+            except OSError:
+                pass
     name = "backup_%s.json" % time.strftime("%Y%m%d_%H%M", time.gmtime(time.time() + TZ_OFFSET))
     return Response(json.dumps(out, ensure_ascii=False), mimetype="application/json",
                     headers={"Content-Disposition": 'attachment; filename="%s"' % name,
@@ -892,7 +1215,15 @@ def admin_backup_restore():
                 c.execute("INSERT INTO %s(%s) VALUES(%s)" % (t, ",".join(keys), ",".join("?" * len(keys))), vals)
                 total += 1
         c.execute("COMMIT")
-        flash("Backup restored (%d records). Everything is back." % total, "ok")
+        for n, b64 in (data.get("music_files") or {}).items():
+            try:
+                n = secure_filename(n)
+                if n:
+                    with open(os.path.join(MUSIC_DIR, n), "wb") as fh:
+                        fh.write(base64.b64decode(b64))
+            except Exception:
+                pass
+        flash("Backup restored (%d records, music included). Everything is back." % total, "ok")
     except Exception as e:
         try:
             c.execute("ROLLBACK")
@@ -920,8 +1251,9 @@ def keep_alive():
 
 
 threading.Thread(target=keep_alive, daemon=True, name="keep-alive").start()
+threading.Thread(target=topup_worker, daemon=True, name="topup-worker").start()
 
-from templates_ui import TEMPLATES, ic  # noqa: E402
+from templates_ui2 import TEMPLATES, ic  # noqa: E402
 app.jinja_env.globals["ic"] = ic
 app.jinja_env.loader = DictLoader(TEMPLATES)
 

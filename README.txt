@@ -22,3 +22,12 @@ ALL PRODUCTS: Admin > Main API > All Products -> select (or Import ALL). Plans +
   Optional markup %. Edit selling prices any time in Admin > Products. Purchases are bought live from the main API.
 BACKUP: Admin > Backup -> Download Backup (json, goes to Downloads). Upload it again to restore everything.
   IMPORTANT: Render free disk is wiped on every redeploy/restart -> download a backup after changes, restore after redeploy.
+
+---- v5 ----
+KEY GENERATOR: pick product -> validity (plan + price) -> quantity (- / +) -> Generate Keys. Keys are made one by one (no timeout) and shown in a copy box.
+KEY HISTORY: search, SRC column (API / PANEL), copy button beside each time, "Plaintext keys" box with Last N (only sizes you really have) / All, Copy all, Download .txt.
+ADD BALANCE (UPI): fixed amounts 200/500/1000/1500/2000/2500 -> QR -> auto verification (also 5 min in background) -> balance credited once.
+  Admin > Gateway: enter Gateway URL (default https://fampaygateway.site), your UPI ID and API token, then "Generate test QR".
+BROADCAST: Admin > Broadcast (one reseller or all). Resellers see it in sidebar > Broadcast (new-notice badge).
+COLOUR: palette button (top right) - saved per reseller, also applied on the login page.
+MUSIC: after reopening, the same song restarts from its beginning; backup now includes uploaded songs (backup file gets bigger).
