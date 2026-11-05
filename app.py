@@ -139,8 +139,15 @@ _BOT_PROC_LOCK = threading.RLock()
 
 def _botmaker_clone_db(dst_path, admin_id, bot_name):
     src_path = os.path.join(BOT_RUNTIME_SOURCE, "shop_data.db")
-    if not os.path.isfile(src_path):
-        raise RuntimeError("Bot database template is missing from deployment.")
+    if not os.path.isfile(src_path) or os.path.getsize(src_path) < 4096:
+        # .db files are often skipped when uploading to GitHub from a phone -> rebuild from the embedded copy
+        import gzip
+        from bot_template_embedded import DATA_B64
+        tdir = os.path.join(DATA_DIR, "bot_template"); os.makedirs(tdir, exist_ok=True)
+        src_path = os.path.join(tdir, "shop_data.db")
+        if not os.path.isfile(src_path) or os.path.getsize(src_path) < 4096:
+            with open(src_path, "wb") as fh:
+                fh.write(gzip.decompress(base64.b64decode("".join(DATA_B64))))
     src = sqlite3.connect(src_path, timeout=30)
     dst = sqlite3.connect(dst_path, timeout=30)
     try:
