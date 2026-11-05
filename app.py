@@ -1,7 +1,10 @@
-import os, re, json, sqlite3, secrets, time, threading, base64
+import os, re, json, sqlite3, secrets, time, threading, base64, hmac, hashlib, zipfile, tempfile
+import html as _html
 import requests
 from flask import (Flask, request, session, redirect, render_template, flash,
-                   jsonify, send_from_directory, abort, Response)
+                   jsonify, send_from_directory, abort, Response, make_response, send_file, after_this_request)
+from werkzeug.middleware.proxy_fix import ProxyFix
+import tgbot
 from jinja2 import DictLoader
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -14,13 +17,17 @@ ADMIN_USER = "RGCHEAT"  # fixed on purpose (env vars ignored) - change later
 ADMIN_PASS = "909090"
 TZ_OFFSET = int(os.environ.get("TZ_OFFSET_MIN", "330")) * 60  # default IST
 MAX_MUSIC = 20
+# ---- TELEGRAM BOT (edit here, nothing else to configure) ----------------------------------------
+TG_BOT_TOKEN = "9001525811:AAGxzhTA9GopN-rILXyAxdGqzBqmsHxlweM"   # token from @BotFather  (keep the GitHub repo PRIVATE)
+TG_ADMIN_ID = "6739795427"      # optional: your own Telegram Chat ID. Leave empty -> open the bot and send:  /admin 909090
 BRAND = "RG CHEAT"      # name shown on login + panel header
 CURRENCY = "₹"         # symbol shown before money amounts (all prices are INR)
 DEFAULT_API_BASE = "https://adminshops.com/api/v1"   # main provider API (editable in Admin > Main API)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-" + ADMIN_PASS)
-app.config.update(SESSION_COOKIE_SAMESITE="Lax", MAX_CONTENT_LENGTH=60 * 1024 * 1024)
+app.config.update(SESSION_COOKIE_SAMESITE="Lax", MAX_CONTENT_LENGTH=250 * 1024 * 1024)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)   # real client IP / https behind Render
 
 
 def db():
@@ -76,6 +83,12 @@ def init_db():
       title TEXT, body TEXT NOT NULL, created INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS broadcast_reads(broadcast_id INTEGER NOT NULL, reseller_id INTEGER NOT NULL,
       PRIMARY KEY(broadcast_id, reseller_id));
+    CREATE TABLE IF NOT EXISTS devices(id INTEGER PRIMARY KEY,
+      reseller_id INTEGER NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
+      dev_id TEXT NOT NULL, label TEXT, ip TEXT, status TEXT NOT NULL DEFAULT 'pending',
+      created INTEGER NOT NULL, decided INTEGER, last_seen INTEGER);
+    CREATE TABLE IF NOT EXISTS otps(reseller_id INTEGER PRIMARY KEY, h TEXT NOT NULL, exp INTEGER NOT NULL,
+      tries INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL);
     """)
     cols = [r[1] for r in c.execute("PRAGMA table_info(plans)")]
     for col, ddl in (("mode", "TEXT DEFAULT 'random'"), ("ext_url", "TEXT DEFAULT ''"),
@@ -84,8 +97,12 @@ def init_db():
                      ("prov_pid", "INTEGER")):
         if col not in cols:
             c.execute("ALTER TABLE plans ADD COLUMN %s %s" % (col, ddl))
-    if "theme" not in [r[1] for r in c.execute("PRAGMA table_info(resellers)")]:
-        c.execute("ALTER TABLE resellers ADD COLUMN theme TEXT DEFAULT ''")
+    rcols = [r[1] for r in c.execute("PRAGMA table_info(resellers)")]
+    for col, ddl in (("theme", "TEXT DEFAULT ''"), ("tg_chat", "TEXT DEFAULT ''"),
+                     ("otp_on", "INTEGER NOT NULL DEFAULT 1"), ("notify", "INTEGER NOT NULL DEFAULT 1"),
+                     ("low_bal", "REAL NOT NULL DEFAULT 50")):
+        if col not in rcols:
+            c.execute("ALTER TABLE resellers ADD COLUMN %s %s" % (col, ddl))
     c.commit()
     c.close()
 
@@ -330,11 +347,23 @@ def buy(rid, plan_id, via="panel"):
                   "VALUES(?,?,?,?,?,?,?,?)", (rid, pl["pname"], pl["name"], key, price, now, exp, via))
     c.close()
     bal = q("SELECT balance FROM resellers WHERE id=?", (rid,), one=True)["balance"]
+    try:
+        notify_purchase(r, pl, price, bal, key, via)
+    except Exception:
+        pass
     return dict(key=key, price=price, expires=exp, balance=bal, product=pl["pname"], plan=pl["name"])
 
 
 # ---- payment gateway (FamPay style: /api/create_order.php + /api/verify.php)
-WALLET_AMOUNTS = [200, 500, 1000, 1500, 2000, 2500]   # INR, fixed list (no custom amount)
+DEFAULT_AMOUNTS = [200, 500, 1000, 1500, 2000, 2500]   # used until the admin sets his own list (Admin > Gateway)
+
+
+def wallet_amounts():
+    out = []
+    for x in re.split(r"[,\s]+", get_setting("wallet_amounts", "")):
+        if x.isdigit() and 1 <= int(x) <= 100000 and int(x) not in out:
+            out.append(int(x))
+    return out[:12] or list(DEFAULT_AMOUNTS)
 DEFAULT_GW_BASE = "https://fampaygateway.site"
 
 
@@ -409,6 +438,11 @@ def credit_topup(tid, d):
         c.execute("UPDATE topups SET status='paid', utr=?, paid_at=? WHERE id=?", (utr, int(time.time()), tid))
         c.execute("UPDATE resellers SET balance=balance+? WHERE id=?", (t["amount"], t["reseller_id"]))
         c.execute("COMMIT")
+        try:
+            rr = c.execute("SELECT * FROM resellers WHERE id=?", (t["reseller_id"],)).fetchone()
+            notify_topup(rr, t["amount"])
+        except Exception:
+            pass
         return True
     except Exception:
         try:
@@ -474,6 +508,9 @@ def reseller_required(f):
         if not r or not r["active"]:
             session.clear()
             return redirect("/login")
+        if dev_check_on() and not device_ok(r["id"]):      # this browser is not an approved device
+            session.clear()
+            return blocked_page()
         request.r = r
         return f(*a, **k)
     return w
@@ -497,6 +534,237 @@ def num(v, default=0.0):
         return default
 
 
+# ---------------------------------------------------------------- telegram + security helpers
+def tg_token():
+    return (os.environ.get("TG_BOT_TOKEN") or TG_BOT_TOKEN or get_setting("tg_token")).strip()
+
+
+def tg_admin():
+    return str(os.environ.get("ADMIN_TG_ID") or TG_ADMIN_ID or get_setting("tg_admin")).strip()
+
+
+_CLAIMS = []
+
+
+def claim_admin(chat_id, secret):
+    """Bot command '/admin <admin password>' makes that Telegram chat the admin (device requests go there)."""
+    now = time.time()
+    _CLAIMS[:] = [t for t in _CLAIMS if now - t < 600]
+    if len(_CLAIMS) >= 5:
+        return False
+    if same(secret.strip(), ADMIN_PASS):
+        set_setting("tg_admin", str(chat_id))
+        return True
+    _CLAIMS.append(now)
+    return False
+
+
+def dev_check_on():
+    """Device approval is active only when the admin has set his Telegram ID (so nobody can get locked out)."""
+    return get_setting("dev_check", "1") == "1" and bool(tg_admin()) and bool(tg_token())
+
+
+def esc(v):
+    return _html.escape(str(v if v is not None else ""))
+
+
+def money_txt(v):
+    return CURRENCY + app.jinja_env.filters["money"](v)
+
+
+def device_decision(did, approve):
+    d = q("SELECT d.*, r.username FROM devices d JOIN resellers r ON r.id=d.reseller_id WHERE d.id=?", (did,), one=True)
+    if not d:
+        return "Request not found"
+    q("UPDATE devices SET status=?, decided=? WHERE id=?", ("approved" if approve else "denied", int(time.time()), did),
+      commit=True)
+    return ("Approved: " if approve else "Rejected: ") + d["username"]
+
+
+bot = tgbot.Bot(tg_token, tg_admin, device_decision, BRAND, claim_admin)
+
+
+def ua_label(ua):
+    ua = ua or ""
+    os_ = next((n for k, n in (("Android", "Android"), ("iPhone", "iPhone"), ("iPad", "iPad"), ("Windows", "Windows"),
+                               ("Mac OS", "macOS"), ("Linux", "Linux")) if k in ua), "Unknown OS")
+    br = next((n for k, n in (("Edg/", "Edge"), ("OPR/", "Opera"), ("SamsungBrowser", "Samsung Browser"),
+                              ("Firefox", "Firefox"), ("Chrome", "Chrome"), ("Safari", "Safari")) if k in ua), "Browser")
+    return "%s on %s" % (br, os_)
+
+
+def notify_purchase(r, pl, price, bal, key, via):
+    """Telegram 'NEW PURCHASE ALERT' (+ low balance alert) to the reseller. Never raises, never blocks."""
+    if not r["tg_chat"] or not r["notify"]:
+        return
+    line = "\u2500" * 16
+    bot.send(r["tg_chat"],
+             "<blockquote>\u2705 <b>NEW PURCHASE ALERT</b></blockquote>\n%s\n"
+             "\u2705 Product: <b>%s</b>\n\U0001F6D2 Quantity: 1\n\U0001F4B0 Wallet Balance: <b>%s</b>\n"
+             "\u23F1 Validity: %d days\n\U0001F4B8 Paid: <b>%s</b>\n\U0001F6AB Paid by: Wallet (%s)\n"
+             "\U0001F511 Key Issued: <code>%s</code>\n%s"
+             % (line, esc(pl["pname"]), money_txt(bal), int(pl["days"]), money_txt(price),
+                "API" if via == "api" else "Panel", esc(key), line))
+    lim = r["low_bal"] or 0
+    if lim > 0 and bal < lim <= r["balance"]:           # only when the balance just dropped under the limit
+        bot.send(r["tg_chat"],
+                 "<blockquote>\U0001F6A8 <b>LOW BALANCE ALERT</b></blockquote>\n%s\n"
+                 "\U0001F4B0 Wallet Balance: <b>%s</b>\n\U0001F6A8 Low balance limit: %s\n"
+                 "\U0001F4B0 Please add funds to your wallet to continue purchasing keys.\n%s"
+                 % (line, money_txt(bal), money_txt(lim), line))
+
+
+def notify_topup(r, amount):
+    if not r or not r["tg_chat"] or not r["notify"]:
+        return
+    bot.send(r["tg_chat"], "<blockquote>\U0001F4B0 <b>BALANCE ADDED</b></blockquote>\n"
+                           "\u2705 Added: <b>%s</b>\n\U0001F4B0 Wallet Balance: <b>%s</b>"
+             % (money_txt(amount), money_txt(r["balance"])))
+
+
+# ---- login protection
+_FAILS = {}
+
+
+def rl_blocked(key, limit=8, window=600):
+    now = time.time()
+    _FAILS[key] = [t for t in _FAILS.get(key, []) if now - t < window]
+    return len(_FAILS[key]) >= limit
+
+
+def rl_hit(key):
+    _FAILS.setdefault(key, []).append(time.time())
+
+
+def otp_hash(rid, code):
+    return hmac.new(app.secret_key.encode(), ("%d:%s" % (rid, code)).encode(), hashlib.sha256).hexdigest()
+
+
+def send_otp(r, force=False):
+    now = int(time.time())
+    o = q("SELECT * FROM otps WHERE reseller_id=?", (r["id"],), one=True)
+    if o and not force and now - o["sent"] < 30 and o["exp"] > now:
+        return                                           # a fresh code was just sent
+    code = "%06d" % secrets.randbelow(1000000)
+    q("INSERT OR REPLACE INTO otps(reseller_id,h,exp,tries,sent) VALUES(?,?,?,?,?)",
+      (r["id"], otp_hash(r["id"], code), now + 300, 0, now), commit=True)
+    bot.send(r["tg_chat"],
+             "<blockquote>\U0001F510 <b>Login verification</b></blockquote>\n\n"
+             "Use this one-time code to sign in to <b>%s</b>.\n\n<blockquote><code>%s</code></blockquote>\n\n"
+             "\u23F1 Expires in <b>5 minutes</b>.\n\U0001F6AB Keep this code private. Our team will never ask for it."
+             % (esc(BRAND), code))
+
+
+def check_otp(rid, code):
+    o = q("SELECT * FROM otps WHERE reseller_id=?", (rid,), one=True)
+    now = int(time.time())
+    if not o or o["exp"] < now:
+        return False, "Code expired. Press Resend to get a new one."
+    if o["tries"] >= 5:
+        q("DELETE FROM otps WHERE reseller_id=?", (rid,), commit=True)
+        return False, "Too many wrong attempts. Please login again."
+    if same(o["h"], otp_hash(rid, code.strip())):
+        q("DELETE FROM otps WHERE reseller_id=?", (rid,), commit=True)
+        return True, ""
+    q("UPDATE otps SET tries=tries+1 WHERE reseller_id=?", (rid,), commit=True)
+    return False, "Wrong code. %d attempt(s) left." % max(4 - o["tries"], 0)
+
+
+# ---- device id (cookie issued by the server, bound to the reseller by the admin's approval)
+def get_dev():
+    d = request.cookies.get("rgd", "")
+    return (d, False) if re.fullmatch(r"[0-9a-f]{32}", d) else (secrets.token_hex(16), True)
+
+
+def set_dev_cookie(resp, dev, is_new):
+    if is_new:
+        resp.set_cookie("rgd", dev, max_age=63072000, httponly=True, samesite="Lax",
+                        secure=request.is_secure)
+    return resp
+
+
+def device_blocked_any(dev):
+    return bool(q("SELECT 1 FROM devices WHERE dev_id=? AND status='denied'", (dev,), one=True))
+
+
+def device_ok(rid):
+    d = request.cookies.get("rgd", "")
+    if not re.fullmatch(r"[0-9a-f]{32}", d):
+        return False
+    row = q("SELECT id FROM devices WHERE reseller_id=? AND dev_id=? AND status='approved'", (rid, d), one=True)
+    if row:
+        q("UPDATE devices SET last_seen=? WHERE id=?", (int(time.time()), row["id"]), commit=True)
+    return bool(row)
+
+
+def blocked_page(msg=None):
+    resp = make_response(render_template("blocked.html", msg=msg), 403)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def ask_admin_approval(r, dev):
+    """Create / refresh a pending device row and send the Accept / Reject message to the admin."""
+    now = int(time.time())
+    d = q("SELECT * FROM devices WHERE reseller_id=? AND dev_id=?", (r["id"], dev), one=True)
+    label = ua_label(request.headers.get("User-Agent", ""))
+    if d and d["status"] == "pending" and now - d["created"] < 120:
+        return d["id"]                                   # request already sent a moment ago
+    if d:
+        did = d["id"]
+        q("UPDATE devices SET status='pending', created=?, label=?, ip=? WHERE id=?",
+          (now, label, request.remote_addr, did), commit=True)
+    else:
+        did = q("INSERT INTO devices(reseller_id,dev_id,label,ip,status,created) VALUES(?,?,?,?,?,?)",
+                (r["id"], dev, label, request.remote_addr, "pending", now), commit=True)
+    bot.send(tg_admin(),
+             "<blockquote>\U0001F514 <b>NEW DEVICE LOGIN REQUEST</b></blockquote>\n\n"
+             "\U0001F464 Reseller: <b>%s</b>\n\U0001F4F1 Device: %s\n\U0001F310 IP: <code>%s</code>\n"
+             "\U0001F552 Time: %s\n\nAllow this device to open the panel?"
+             % (esc(r["username"]), esc(label), esc(request.remote_addr), fmt(now)),
+             [[("\u2705 Accept", "dv:a:%d" % did), ("\u274C Reject", "dv:d:%d" % did)]])
+    return did
+
+
+def finish_login(r, dev, alert=False):
+    """Final step: the browser becomes logged in. Returns the URL to go to."""
+    session.clear()
+    session["rid"] = r["id"]
+    q("UPDATE devices SET last_seen=? WHERE reseller_id=? AND dev_id=?", (int(time.time()), r["id"], dev), commit=True)
+    if alert and r["tg_chat"] and r["notify"]:
+        bot.send(r["tg_chat"], "<blockquote>\U0001F513 <b>NEW LOGIN</b></blockquote>\n\U0001F4F1 %s\n"
+                               "\U0001F310 IP: <code>%s</code>\n\U0001F552 %s"
+                 % (esc(ua_label(request.headers.get("User-Agent", ""))), esc(request.remote_addr), fmt(time.time())))
+    return "/dashboard"
+
+
+def next_step(r, dev):
+    """After password (+ device approval): code check if enabled, otherwise straight in. Returns a URL."""
+    if r["otp_on"] and r["tg_chat"] and tg_token():
+        session.clear()
+        session["pre"] = dict(rid=r["id"], dev=dev, ts=int(time.time()))
+        send_otp(r)
+        return "/login/verify"
+    return finish_login(r, dev, alert=True)
+
+
+def with_theme(resp, r):
+    if r["theme"]:
+        resp.set_cookie("rg_theme", r["theme"][1:], max_age=31536000, samesite="Lax")
+    return resp
+
+
+PRE_TTL = 900
+
+
+def pre_reseller():
+    p = session.get("pre")
+    if not p or time.time() - p.get("ts", 0) > PRE_TTL:
+        return None, None
+    r = q("SELECT * FROM resellers WHERE id=? AND active=1", (p["rid"],), one=True)
+    return (r, p) if r else (None, None)
+
+
 # ---------------------------------------------------------------- public
 @app.route("/health")
 def health():
@@ -509,29 +777,101 @@ def index():
 
 
 def do_login():
-    """ONE login for everybody: admin credentials -> admin panel, reseller credentials -> reseller panel."""
+    """ONE login for everybody: admin credentials -> admin panel, reseller credentials -> reseller panel
+    (reseller: password -> device approval by admin -> 6 digit Telegram code -> dashboard)."""
+    dev, is_new = get_dev()
+    ip = request.remote_addr or "?"
+
+    def out(resp):
+        return set_dev_cookie(resp, dev, is_new)
+    if dev_check_on() and device_blocked_any(dev):          # rejected device: the login page is never shown
+        return out(blocked_page())
     if request.method == "POST":
         u = request.form.get("username", "").strip()
         raw = request.form.get("password", "")
         pw = raw.strip()
+        if rl_blocked("ip:" + ip):
+            flash("Too many attempts. Please wait 10 minutes.", "err")
+            return out(make_response(render_template("login.html", title="Login", action=request.path)))
         if same(u.upper(), ADMIN_USER.upper()) and same(pw, ADMIN_PASS):
             session.clear()
             session["admin"] = True
-            return redirect("/admin")
+            return out(redirect("/admin"))
         for r in q("SELECT * FROM resellers WHERE lower(username)=lower(?)", (u,)):
             if check_password_hash(r["pw"], raw) or check_password_hash(r["pw"], pw):
                 if not r["active"]:
                     flash("Your account is disabled. Please contact admin.", "err")
                     break
-                session.clear()
-                session["rid"] = r["id"]
-                resp = redirect("/dashboard")
-                if r["theme"]:
-                    resp.set_cookie("rg_theme", r["theme"][1:], max_age=31536000, samesite="Lax")
-                return resp
+                if dev_check_on():
+                    d = q("SELECT * FROM devices WHERE reseller_id=? AND dev_id=?", (r["id"], dev), one=True)
+                    if d and d["status"] == "denied":
+                        return out(blocked_page())
+                    if not d or d["status"] != "approved":
+                        ask_admin_approval(r, dev)
+                        session.clear()
+                        session["pre"] = dict(rid=r["id"], dev=dev, ts=int(time.time()))
+                        return out(redirect("/login/wait"))
+                return out(with_theme(redirect(next_step(r, dev)), r))
         else:
+            rl_hit("ip:" + ip)
             flash("Invalid username or password", "err")
-    return render_template("login.html", title="Login", action=request.path)
+    return out(make_response(render_template("login.html", title="Login", action=request.path)))
+
+
+@app.route("/login/wait")
+def login_wait():
+    r, p = pre_reseller()
+    if not r:
+        return redirect("/login")
+    return render_template("login_wait.html", title="Approval needed")
+
+
+@app.route("/login/status")
+def login_status():
+    r, p = pre_reseller()
+    if not r:
+        return jsonify(status="gone", next="/login")
+    d = q("SELECT * FROM devices WHERE reseller_id=? AND dev_id=?", (r["id"], p["dev"]), one=True)
+    if not d:
+        return jsonify(status="gone", next="/login")
+    if d["status"] == "approved" and request.cookies.get("rgd") == p["dev"]:
+        return with_theme(jsonify(status="approved", next=next_step(r, p["dev"])), r)
+    if d["status"] == "denied":
+        return jsonify(status="denied", next="/login")
+    if int(time.time()) - d["created"] > 600:
+        return jsonify(status="expired", next="/login")
+    return jsonify(status="pending")
+
+
+@app.route("/login/cancel")
+def login_cancel():
+    session.clear()
+    return redirect("/login")
+
+
+@app.route("/login/verify", methods=["GET", "POST"])
+def login_verify():
+    r, p = pre_reseller()
+    if not r or request.cookies.get("rgd") != p["dev"]:
+        return redirect("/login")
+    if request.method == "POST":
+        if request.form.get("action") == "resend":
+            if rl_blocked("otp-send:%d" % r["id"], 5, 600):
+                flash("Too many codes requested. Wait a few minutes.", "err")
+            else:
+                rl_hit("otp-send:%d" % r["id"])
+                send_otp(r, force=True)
+                flash("A new code was sent to your Telegram.", "ok")
+            return render_template("login_verify.html", title="Verification")
+        if rl_blocked("otp:%d" % r["id"], 10, 600):
+            flash("Too many wrong codes. Please wait 10 minutes.", "err")
+            return render_template("login_verify.html", title="Verification")
+        ok, msg = check_otp(r["id"], request.form.get("code", ""))
+        if ok:
+            return with_theme(redirect(finish_login(r, p["dev"])), r)
+        rl_hit("otp:%d" % r["id"])
+        flash(msg, "err")
+    return render_template("login_verify.html", title="Verification")
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -619,6 +959,41 @@ def set_theme():
     return resp
 
 
+# ---- security (reseller)
+@app.route("/security", methods=["GET", "POST"])
+@reseller_required
+def security():
+    r = request.r
+    if request.method == "POST":
+        a = request.form.get("action")
+        if a == "otp_on":
+            if not r["tg_chat"]:
+                flash("Your Telegram is not linked yet. Ask admin to add your Chat ID.", "err")
+            else:
+                q("UPDATE resellers SET otp_on=1 WHERE id=?", (r["id"],), commit=True)
+                flash("Login verification is ON", "ok")
+        elif a == "otp_off":
+            pw = request.form.get("password", "")
+            if check_password_hash(r["pw"], pw) or check_password_hash(r["pw"], pw.strip()):
+                q("UPDATE resellers SET otp_on=0 WHERE id=?", (r["id"],), commit=True)
+                flash("Login verification is OFF. Username + password is enough to log in.", "ok")
+            else:
+                flash("Wrong password", "err")
+        elif a == "alerts":
+            q("UPDATE resellers SET notify=?, low_bal=? WHERE id=?",
+              (1 if request.form.get("notify") else 0, max(num(request.form.get("low_bal")), 0), r["id"]), commit=True)
+            flash("Alert settings saved", "ok")
+        elif a == "rm_device":
+            q("DELETE FROM devices WHERE id=? AND reseller_id=?", (int(num(request.form.get("id"))), r["id"]), commit=True)
+            flash("Device removed", "ok")
+        return redirect("/security")
+    devs = q("SELECT * FROM devices WHERE reseller_id=? ORDER BY id DESC", (r["id"],))
+    tc = r["tg_chat"] or ""
+    return render_template("security.html", r=r, devs=devs, cur_dev=request.cookies.get("rgd", ""),
+                           tg_mask=("\u2022" * max(len(tc) - 3, 0) + tc[-3:]) if tc else "",
+                           bot_ready=bool(tg_token()), dev_on=dev_check_on(), page="security")
+
+
 # ---- wallet (UPI top-up)
 def my_topup(tid):
     return q("SELECT * FROM topups WHERE id=? AND reseller_id=?", (tid, request.r["id"]), one=True) or abort(404)
@@ -628,7 +1003,7 @@ def my_topup(tid):
 @reseller_required
 def wallet():
     tops = q("SELECT * FROM topups WHERE reseller_id=? ORDER BY id DESC LIMIT 8", (request.r["id"],))
-    return render_template("wallet.html", r=request.r, amts=WALLET_AMOUNTS, tops=tops,
+    return render_template("wallet.html", r=request.r, amts=wallet_amounts(), tops=tops,
                            ready=bool(get_setting("gw_key")), page="wallet")
 
 
@@ -637,7 +1012,7 @@ def wallet():
 def wallet_create():
     rid, now = request.r["id"], int(time.time())
     amt = int(num(request.form.get("amount")))
-    if amt not in WALLET_AMOUNTS:
+    if amt not in wallet_amounts():
         flash("Please choose one of the listed amounts", "err")
         return redirect("/wallet")
     ex = q("SELECT id FROM topups WHERE reseller_id=? AND amount=? AND status='pending' AND deadline>? ORDER BY id DESC",
@@ -925,10 +1300,17 @@ def admin_resellers():
         elif q("SELECT 1 FROM resellers WHERE lower(username)=lower(?)", (u,), one=True):
             flash("Username already exists", "err")
         else:
+            tg = request.form.get("tg_chat", "").strip()
+            if tg and not re.fullmatch(r"-?\d{5,15}", tg):
+                flash("Telegram Chat ID must be numbers only", "err")
+                return redirect("/admin/resellers")
             try:
-                q("INSERT INTO resellers(username,pw,balance,api_key,created) VALUES(?,?,?,?,?)",
-                  (u, generate_password_hash(p), num(request.form.get("credit")), new_api_key(), int(time.time())),
+                q("INSERT INTO resellers(username,pw,balance,api_key,created,tg_chat) VALUES(?,?,?,?,?,?)",
+                  (u, generate_password_hash(p), num(request.form.get("credit")), new_api_key(), int(time.time()), tg),
                   commit=True)
+                if tg:
+                    bot.send(tg, "\u2705 <b>%s</b>\n\nYour account <b>%s</b> is now linked. Login codes and purchase "
+                                 "alerts will arrive here." % (esc(BRAND), esc(u)))
                 flash("Reseller created", "ok")
             except sqlite3.IntegrityError:
                 flash("Username already exists", "err")
@@ -951,6 +1333,19 @@ def admin_reseller(rid):
             flash("Password changed", "ok")
         elif a == "toggle":
             q("UPDATE resellers SET active=1-active WHERE id=?", (rid,), commit=True)
+        elif a == "tg":
+            tg = request.form.get("tg_chat", "").strip()
+            if tg and not re.fullmatch(r"-?\d{5,15}", tg):
+                flash("Telegram Chat ID must be numbers only", "err")
+            else:
+                q("UPDATE resellers SET tg_chat=? WHERE id=?", (tg, rid), commit=True)
+                if tg:
+                    bot.send(tg, "\u2705 <b>%s</b>\n\nYour account <b>%s</b> is now linked. Login codes and purchase "
+                                 "alerts will arrive here." % (esc(BRAND), esc(r["username"])))
+                flash("Telegram saved" if tg else "Telegram unlinked", "ok")
+        elif a == "otp_toggle":
+            q("UPDATE resellers SET otp_on=1-otp_on WHERE id=?", (rid,), commit=True)
+            flash("Login verification changed", "ok")
         elif a == "prices":
             for pl in q("SELECT id FROM plans"):
                 v = request.form.get("p_%d" % pl["id"], "").strip()
@@ -965,7 +1360,8 @@ def admin_reseller(rid):
             return redirect("/admin/resellers")
         return redirect("/admin/reseller/%d" % rid)
     cat = catalog(rid)
-    return render_template("admin_reseller.html", r=r, cat=cat, page="resellers")
+    devs = q("SELECT * FROM devices WHERE reseller_id=? ORDER BY id DESC", (rid,))
+    return render_template("admin_reseller.html", r=r, cat=cat, devs=devs, page="resellers")
 
 
 @app.route("/admin/gateway", methods=["GET", "POST"])
@@ -979,6 +1375,9 @@ def admin_gateway():
             if not re.match(r"^https?://", base):
                 flash("Gateway URL must start with http:// or https://", "err")
                 return redirect("/admin/gateway")
+            amts = sorted({int(x) for x in re.split(r"[,\s]+", f.get("amounts", "")) if x.isdigit() and 1 <= int(x) <= 100000})
+            if amts:
+                set_setting("wallet_amounts", ",".join(str(x) for x in amts[:12]))
             set_setting("gw_base", base)
             set_setting("gw_upi", f.get("upi", "").strip())
             if f.get("token", "").strip():
@@ -993,7 +1392,56 @@ def admin_gateway():
     key = get_setting("gw_key")
     tops = q("SELECT t.*, r.username FROM topups t JOIN resellers r ON r.id=t.reseller_id ORDER BY t.id DESC LIMIT 20")
     return render_template("admin_gateway.html", base=gw_base(), upi=get_setting("gw_upi"),
-                           tail=key[-4:] if key else "", test=test, tops=tops, page="gateway")
+                           tail=key[-4:] if key else "", test=test, tops=tops, amounts=", ".join(str(x) for x in wallet_amounts()),
+                           page="gateway")
+
+
+@app.route("/admin/telegram", methods=["GET", "POST"])
+@admin_required
+def admin_telegram():
+    if request.method == "POST":
+        f = request.form
+        a = f.get("action")
+        if a == "save":
+            tok = f.get("token", "").strip()
+            adm_id = f.get("admin_id", "").strip()
+            if tok:
+                if not re.fullmatch(r"\d{6,12}:[\w-]{30,60}", tok):
+                    flash("That does not look like a bot token (from @BotFather)", "err")
+                    return redirect("/admin/telegram")
+                set_setting("tg_token", tok)
+            if adm_id and not re.fullmatch(r"-?\d{5,15}", adm_id):
+                flash("Admin Chat ID must be numbers only", "err")
+                return redirect("/admin/telegram")
+            set_setting("tg_admin", adm_id)
+            set_setting("dev_check", "1" if f.get("dev_check") else "0")
+            flash("Telegram settings saved", "ok")
+        elif a == "test":
+            ok, err = bot.send_now(tg_admin(), "\u2705 <b>%s</b>\nTest message - the bot is connected." % esc(BRAND))
+            flash("Test message sent to your Telegram" if ok else "Could not send: %s (open the bot and press Start first)" % err,
+                  "ok" if ok else "err")
+        return redirect("/admin/telegram")
+    me = bot.me() if tg_token() else None
+    return render_template("admin_telegram.html", me=me, has_token=bool(tg_token()), tail=tg_token()[-4:],
+                           admin_id=tg_admin(), dev_check=get_setting("dev_check", "1") == "1",
+                           env_tok=bool(os.environ.get("TG_BOT_TOKEN") or TG_BOT_TOKEN), env_adm=bool(os.environ.get("ADMIN_TG_ID") or TG_ADMIN_ID),
+                           active=dev_check_on(), page="telegram")
+
+
+@app.route("/admin/devices", methods=["GET", "POST"])
+@admin_required
+def admin_devices():
+    if request.method == "POST":
+        a, did = request.form.get("action"), int(num(request.form.get("id")))
+        if a in ("approve", "deny"):
+            device_decision(did, a == "approve")
+        elif a == "delete":
+            q("DELETE FROM devices WHERE id=?", (did,), commit=True)
+        flash("Done", "ok")
+        return redirect("/admin/devices")
+    rows = q("SELECT d.*, r.username FROM devices d JOIN resellers r ON r.id=d.reseller_id "
+             "ORDER BY (d.status='pending') DESC, d.id DESC LIMIT 300")
+    return render_template("admin_devices.html", rows=rows, page="devices")
 
 
 @app.route("/admin/broadcast", methods=["GET", "POST"])
@@ -1152,15 +1600,22 @@ def admin_main_api_products():
 
 
 # ---------------------------------------------------------------- admin: backup / restore
-BACKUP_TABLES = ["products", "plans", "resellers", "custom_prices", "license_keys", "music", "stock", "settings",
-                 "topups", "broadcasts", "broadcast_reads"]
+BACKUP_TABLES = ["products", "plans", "resellers", "custom_prices", "license_keys", "stock", "settings",
+                 "topups", "broadcasts", "broadcast_reads", "devices"]      # music has its OWN backup (below)
 
 
 @app.route("/admin/backup")
 @admin_required
 def admin_backup():
     counts = {t: q("SELECT COUNT(*) FROM %s" % t, one=True)[0] for t in BACKUP_TABLES}
-    return render_template("admin_backup.html", counts=counts, page="backup")
+    songs = q("SELECT * FROM music ORDER BY id")
+    size = 0
+    for m in songs:
+        try:
+            size += os.path.getsize(os.path.join(MUSIC_DIR, os.path.basename(m["url"]))) if m["url"].startswith("/media/") else 0
+        except OSError:
+            pass
+    return render_template("admin_backup.html", counts=counts, songs=len(songs), msize=round(size / 1048576, 1), page="backup")
 
 
 @app.route("/admin/backup/download")
@@ -1169,14 +1624,6 @@ def admin_backup_download():
     out = dict(app="reseller-panel", version=1, created=int(time.time()), tables={})
     for t in BACKUP_TABLES:
         out["tables"][t] = [dict(r) for r in q("SELECT * FROM %s" % t)]
-    out["music_files"] = {}            # uploaded songs are stored inside the backup too
-    for m in out["tables"]["music"]:
-        if (m.get("url") or "").startswith("/media/"):
-            try:
-                with open(os.path.join(MUSIC_DIR, os.path.basename(m["url"])), "rb") as fh:
-                    out["music_files"][os.path.basename(m["url"])] = base64.b64encode(fh.read()).decode()
-            except OSError:
-                pass
     name = "backup_%s.json" % time.strftime("%Y%m%d_%H%M", time.gmtime(time.time() + TZ_OFFSET))
     return Response(json.dumps(out, ensure_ascii=False), mimetype="application/json",
                     headers={"Content-Disposition": 'attachment; filename="%s"' % name,
@@ -1215,15 +1662,7 @@ def admin_backup_restore():
                 c.execute("INSERT INTO %s(%s) VALUES(%s)" % (t, ",".join(keys), ",".join("?" * len(keys))), vals)
                 total += 1
         c.execute("COMMIT")
-        for n, b64 in (data.get("music_files") or {}).items():
-            try:
-                n = secure_filename(n)
-                if n:
-                    with open(os.path.join(MUSIC_DIR, n), "wb") as fh:
-                        fh.write(base64.b64decode(b64))
-            except Exception:
-                pass
-        flash("Backup restored (%d records, music included). Everything is back." % total, "ok")
+        flash("Backup restored (%d records). Music is not part of this backup - restore it from the Music backup below." % total, "ok")
     except Exception as e:
         try:
             c.execute("ROLLBACK")
@@ -1232,6 +1671,73 @@ def admin_backup_restore():
         flash("Restore failed, nothing was changed: %s" % str(e)[:120], "err")
     finally:
         c.close()
+    return redirect("/admin/backup")
+
+
+# ---- separate MUSIC backup (one .zip: song list + the uploaded audio files)
+@app.route("/admin/music/backup")
+@admin_required
+def admin_music_backup():
+    rows = [dict(r) for r in q("SELECT title, url FROM music ORDER BY id")]
+    fd, path = tempfile.mkstemp(suffix=".zip", dir=DATA_DIR)
+    os.close(fd)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:          # audio is already compressed
+        z.writestr("music.json", json.dumps(dict(app="reseller-panel-music", version=1, rows=rows), ensure_ascii=False))
+        for m in rows:
+            if m["url"].startswith("/media/"):
+                fp = os.path.join(MUSIC_DIR, os.path.basename(m["url"]))
+                if os.path.isfile(fp):
+                    z.write(fp, "files/" + os.path.basename(m["url"]))
+
+    @after_this_request
+    def _rm(resp):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return resp
+    name = "music_backup_%s.zip" % time.strftime("%Y%m%d_%H%M", time.gmtime(time.time() + TZ_OFFSET))
+    return send_file(path, as_attachment=True, download_name=name, mimetype="application/zip", max_age=0)
+
+
+@app.route("/admin/music/restore", methods=["POST"])
+@admin_required
+def admin_music_restore():
+    f = request.files.get("file")
+    try:
+        z = zipfile.ZipFile(f.stream)
+        meta = json.loads(z.read("music.json").decode("utf-8"))
+        if meta.get("app") != "reseller-panel-music" or not isinstance(meta.get("rows"), list):
+            raise ValueError("bad")
+    except Exception:
+        flash("This is not a music backup file of this panel", "err")
+        return redirect("/admin/backup")
+    for m in q("SELECT * FROM music"):                                  # replace the current library
+        if m["url"].startswith("/media/"):
+            try:
+                os.remove(os.path.join(MUSIC_DIR, os.path.basename(m["url"])))
+            except OSError:
+                pass
+    q("DELETE FROM music", commit=True)
+    names = {n for n in z.namelist() if n.startswith("files/") and not n.endswith("/")}
+    n_files = n_rows = 0
+    for n in names:
+        safe = secure_filename(os.path.basename(n))
+        if safe:
+            with z.open(n) as src, open(os.path.join(MUSIC_DIR, safe), "wb") as dst:
+                while True:
+                    chunk = src.read(1 << 20)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+            n_files += 1
+    for m in meta["rows"]:
+        url = str(m.get("url") or "")
+        if url.startswith("/media/") and not os.path.isfile(os.path.join(MUSIC_DIR, secure_filename(os.path.basename(url)))):
+            continue                                                    # file missing inside the zip
+        q("INSERT INTO music(title,url) VALUES(?,?)", (str(m.get("title") or "")[:200], url), commit=True)
+        n_rows += 1
+    flash("Music restored: %d song(s), %d audio file(s)." % (n_rows, n_files), "ok")
     return redirect("/admin/backup")
 
 
@@ -1252,6 +1758,7 @@ def keep_alive():
 
 threading.Thread(target=keep_alive, daemon=True, name="keep-alive").start()
 threading.Thread(target=topup_worker, daemon=True, name="topup-worker").start()
+bot.start()                                   # Telegram bot (login codes, alerts, device approval)
 
 from templates_ui2 import TEMPLATES, ic  # noqa: E402
 app.jinja_env.globals["ic"] = ic

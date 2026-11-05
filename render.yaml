@@ -13,3 +13,7 @@ services:
         sync: false
       - key: SECRET_KEY
         generateValue: true
+      - key: TG_BOT_TOKEN
+        sync: false
+      - key: ADMIN_TG_ID
+        sync: false

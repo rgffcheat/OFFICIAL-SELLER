@@ -10,6 +10,8 @@ _P.update({
  "minus": '<path d="M5 12h14"/>',
  "trash": '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
  "hourglass": '<path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.17a2 2 0 0 0-.59-1.41L12 12l-4.41 4.42A2 2 0 0 0 7 17.83V22"/><path d="M7 2v4.17a2 2 0 0 0 .59 1.41L12 12l4.41-4.42A2 2 0 0 0 17 6.17V2"/>',
+ "shield2": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+ "phone": '<rect width="14" height="20" x="5" y="2" rx="2"/><path d="M12 18h.01"/>',
  "send": '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
 })
 
@@ -64,7 +66,43 @@ EXTRA = """
 .sw{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0}.sw button{width:42px;height:42px;border-radius:50%;padding:0;border:2px solid rgba(255,255,255,.35);box-shadow:none}
 .sw input[type=color]{width:100%;height:46px;padding:2px;border-radius:12px}
 """
-CSS2 = ROOT + _body + EXTRA
+SLIM = """
+body{font-size:14px}
+button,.btn{padding:8px 14px;font-size:14px;border-radius:9px}
+input,select,textarea{padding:8px 11px;font-size:14px;border-radius:9px}
+.iconbtn{width:40px;height:40px;border-radius:12px}
+.tile{width:40px;height:40px;border-radius:12px}
+.welcome{padding:16px;border-radius:20px}.welcome .tile{width:48px;height:48px;border-radius:14px}.welcome h1{font-size:22px}
+.balrow{padding:11px;margin-top:12px}.balrow b{font-size:26px}.balrow .tile{width:36px;height:36px}
+.gen{padding:11px;font-size:14px;border-radius:12px;margin-top:12px}
+.kpi{padding:13px 8px;border-radius:15px}.kpi b{font-size:26px}.kpi .tile{width:36px;height:36px;margin-bottom:7px}.kpi span{font-size:11px}
+.wide{padding:14px 8px}.wide b{font-size:28px}
+.krow{padding:10px 12px}.krow .tile{width:38px;height:38px}
+.sec h3{font-size:16px}
+.gh{font-size:19px;padding:16px 10px;letter-spacing:.16em}
+.gcard{border-radius:22px}.gs{padding:11px 10px;font-size:13px}.gb{padding:14px}
+.gb .l{font-size:13px;margin:13px 0 8px}
+.gb select,.gb .qi{padding:11px 14px;font-size:15px;border-radius:13px}
+.sq{width:46px;height:44px;font-size:22px;border-radius:12px}
+.genb{padding:12px;font-size:15px;border-radius:13px;letter-spacing:.1em;margin-top:16px}
+.hd{font-size:19px;padding:12px;border-radius:16px}
+.sbox input{padding:10px 12px 10px 42px}
+.tbl th{padding:10px 8px}.tbl td{padding:9px 8px}
+.plain{padding:13px;border-radius:18px}.plain select,.plain input.f{padding:10px;border-radius:11px}
+.two button{padding:10px}
+.amt{padding:11px 4px;font-size:15px;border-radius:12px}
+.bal{padding:15px;border-radius:18px}.bal b{font-size:28px}
+.side{padding:16px}.side a{padding:9px 12px;font-size:14px;border-radius:9px}
+.top{padding:9px 12px}.player{padding:2px 6px}
+.cp{padding:5px!important}
+.lg .box{padding:24px 20px 20px;border-radius:26px}.lg .logo-t{width:56px;height:56px;border-radius:16px;margin-bottom:10px}
+.lg h1{font-size:24px}.lg .tag{padding:7px 14px;font-size:13px;margin-bottom:16px}
+.lg label{font-size:14px;margin:11px 0 6px}.lg .fld{border-radius:12px}.lg .fld input{padding:11px 0;font-size:15px}
+.lg .go{padding:12px;font-size:14px;border-radius:12px}
+.card{padding:15px;border-radius:14px}
+h2{font-size:21px}
+"""
+CSS2 = ROOT + _body + EXTRA + SLIM
 
 THEME_JS = r"""
 (function(){function h2r(h){h=h.replace('#','');return[0,2,4].map(function(i){return parseInt(h.substr(i,2),16)})}
@@ -84,7 +122,7 @@ window.initTheme=function(server){var c=server||ck()||(function(){try{return loc
 T = dict(_T)
 for k in ("login.html", "rbase.html", "abase.html"):
     T[k] = T[k].replace(CSS, CSS2)
-T["login.html"] = T["login.html"].replace("</style></head>", "</style><script>" + THEME_JS + "initTheme('');</script></head>", 1)
+T["login.html"] = T["login.html"].replace("</style></head>", "</style><script>" + THEME_JS + "initTheme('');try{['mu','mt','mp','ts'].forEach(function(k){sessionStorage.removeItem(k)})}catch(e){}</script></head>", 1)
 
 # ---------------------------------------------------------------- reseller base
 T["rbase.html"] = HEAD + """Reseller Panel</title><style>""" + CSS2 + """</style><script>""" + THEME_JS + """initTheme({{(r.theme or '')|tojson}});</script></head><body>
@@ -95,6 +133,7 @@ T["rbase.html"] = HEAD + """Reseller Panel</title><style>""" + CSS2 + """</style
 <a href="/generate" class="{{'on' if page=='generate'}}">{{ic('bolt')}} Generate Key</a>
 <a href="/history" class="{{'on' if page=='history'}}">{{ic('history')}} Key History</a>
 <a href="/wallet" class="{{'on' if page=='wallet'}}">{{ic('wallet')}} Add Balance</a>
+<a href="/security" class="{{'on' if page=='security'}}">{{ic('shield2')}} Security</a>
 <a href="/broadcast" class="{{'on' if page=='broadcast'}}">{{ic('bell')}} Broadcast{% if unread and page!='broadcast' %}<span class=badge>{{unread}}</span>{% endif %}</a>
 <a href="/api-docs" class="{{'on' if page=='api'}}">{{ic('code')}} API &amp; Docs</a>
 <a href="/logout">{{ic('logout')}} Logout</a></div>
@@ -115,15 +154,23 @@ function pick(c){applyTheme(c);saveTheme(c);cc.value=c;const f=new FormData();f.
 cc.onchange=()=>pick(cc.value);pal.onclick=()=>mod.classList.add('open');mx.onclick=()=>mod.classList.remove('open');mod.onclick=e=>{if(e.target===mod)mod.classList.remove('open')};
 (async()=>{let L=[];try{L=await(await fetch('/music.json')).json()}catch(e){}
 if(!L.length){pl.style.display='none';return}
-const ss=sessionStorage;let i=+localStorage.mi||0;if(i>=L.length)i=0;
-function load(n){i=(n+L.length)%L.length;au.src=L[i].url;ttl.textContent=L[i].title;localStorage.mi=i}
-function play(){au.play().then(()=>{pp.innerHTML=PAUSE;ss.mp=1}).catch(()=>{pp.innerHTML=PLAY})}
-function pause(){au.pause();pp.innerHTML=PLAY;ss.mp=0}
-load(i);if(ss.mt)au.addEventListener('loadedmetadata',()=>{au.currentTime=+ss.mt},{once:true});
-pp.onclick=()=>au.paused?play():pause();
-nx.onclick=()=>{ss.mt=0;load(i+1);play()};pv.onclick=()=>{ss.mt=0;load(i-1);play()};au.onended=()=>{ss.mt=0;load(i+1);play()};
-setInterval(()=>{if(!au.paused)ss.mt=au.currentTime},1000);
-if(ss.mp!=='0'){play();document.addEventListener('click',()=>{if(au.paused&&ss.mp!=='0')play()},{once:true})}
+const ss=sessionStorage;let i=0;
+if(ss.mu){const k=L.findIndex(x=>x.url===ss.mu);i=k>=0?k:0}else{i=+localStorage.mi||0;if(i>=L.length)i=0}
+let leaving=false;
+function save(){try{ss.mu=L[i].url;ss.mt=au.currentTime||0;if(!au.paused)ss.ts=Date.now()}catch(e){}}
+function load(n,seek){i=(n+L.length)%L.length;au.src=L[i].url;ttl.textContent=L[i].title;localStorage.mi=i;
+ return new Promise(res=>{au.addEventListener('loadedmetadata',()=>{if(seek>0){try{au.currentTime=seek}catch(e){}}res()},{once:true})})}
+function play(){return au.play().catch(()=>{pp.innerHTML=PLAY;arm()})}
+function arm(){['pointerdown','keydown','touchstart'].forEach(ev=>document.addEventListener(ev,()=>{if(au.paused&&ss.mp!=='0')play()},{once:true}))}
+au.onplay=()=>{pp.innerHTML=PAUSE;ss.mp=1};au.onpause=()=>{pp.innerHTML=PLAY;if(!au.ended&&!leaving)ss.mp=0};
+au.ontimeupdate=save;
+['pagehide','beforeunload'].forEach(ev=>addEventListener(ev,()=>{leaving=true;save()}));
+pp.onclick=()=>au.paused?play():au.pause();
+nx.onclick=async()=>{await load(i+1,0);play()};pv.onclick=async()=>{await load(i-1,0);play()};
+au.onended=async()=>{await load(i+1,0);play()};
+let t=+ss.mt||0;if(ss.mp==='1'&&ss.ts){const d=(Date.now()-ss.ts)/1000;if(d<8)t+=d}
+await load(i,t);
+if(ss.mp!=='0')play();else pp.innerHTML=PLAY;
 })();
 </script></body></html>"""
 
@@ -254,5 +301,151 @@ T["admin_broadcast.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic(
 <div class="card tw"><h3>Sent</h3><table><tr><th>To</th><th>Message</th><th>Time</th><th></th></tr>
 {% for x in rows %}<tr><td>{{x.username or 'ALL'}}</td><td><b>{{x.title}}</b><div class=mu style="white-space:pre-wrap">{{x.body}}</div></td><td>{{x.created|dt}}</td>
 <td><form method=post><input type=hidden name=action value=delete><input type=hidden name=id value="{{x.id}}"><button class=r>{{ic('trash',16)}}</button></form></td></tr>{% else %}<tr><td colspan=4>Nothing sent yet</td></tr>{% endfor %}</table></div>{% endblock %}"""
+
+# ================================================================ v6: login verification, devices, security, telegram
+LGHEAD = HEAD + """{{BRAND}} - {{title}}</title><style>""" + CSS2 + """</style><script>""" + THEME_JS + """initTheme('');</script></head><body>
+<div class="lg"><div class="box">"""
+LGFOOT = """<div class="copy">&copy; {{year}} {{BRAND}}</div></div></div>"""
+
+T["login_wait.html"] = LGHEAD + """<div class="logo-t">{{ic('hourglass',30)}}</div><h1>Approval needed</h1><div class="dv"><i></i><u></u><i></i></div>
+<div class="tag">{{ic('shield2',18)}} New device</div>""" + FLASH + """
+<p class=mu style="text-align:center;margin:0 0 14px">Your password is correct. The admin was asked to approve this device.<br>Keep this page open &mdash; you will enter automatically.</p>
+<div class="cd" id=st style="font-size:18px">Waiting for admin&hellip;</div>
+<a class="btn" href="/login/cancel" style="display:block;text-align:center;margin-top:16px;background:none;border:1px solid var(--bd);box-shadow:none">Cancel</a>
+<script>
+async function p(){try{const j=await(await fetch('/login/status',{cache:'no-store'})).json();
+ if(j.status==='approved'||j.status==='denied'||j.status==='gone'){location.href=j.next;return}
+ if(j.status==='expired'){document.getElementById('st').textContent='Request expired. Please login again.';setTimeout(()=>location.href=j.next,2500);return}}catch(e){}
+ setTimeout(p,3000)}
+p();
+</script>""" + LGFOOT + "</body></html>"
+
+T["login_verify.html"] = LGHEAD + """<div class="logo-t">{{ic('shield2',30)}}</div><h1>Verification</h1><div class="dv"><i></i><u></u><i></i></div>
+<div class="tag">{{ic('send',18)}} Code sent to Telegram</div>""" + FLASH + """
+<form method=post autocomplete=off>
+<label for=cd>Enter the 6-digit code</label>
+<div class="fld">{{ic('lock',20)}}<input id=cd name=code inputmode=numeric pattern="[0-9]{6}" maxlength=6 minlength=6 placeholder="000000" required autofocus autocomplete=one-time-code style="letter-spacing:.4em;font-weight:800;font-size:20px"></div>
+<div class="sess">{{ic('hourglass',16)}} Code expires in 5 minutes</div>
+<button class="go">VERIFY {{ic('arrow',20)}}</button></form>
+<form method=post style="margin-top:12px"><input type=hidden name=action value=resend>
+<button class="o" style="width:100%;background:none;border:1px solid var(--bd);box-shadow:none">Resend code</button></form>
+<a href="/login/cancel" style="display:block;text-align:center;margin-top:14px;font-size:13px">&larr; Back to login</a>""" + LGFOOT + "</body></html>"
+
+T["blocked.html"] = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=theme-color content="#450a0a"><title>Access blocked</title>
+<style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:18px;font:15px/1.5 system-ui,Segoe UI,Arial,sans-serif;color:#fff;
+background:radial-gradient(70% 60% at 50% 0%,#7f1d1d,#1c0505 70%)}
+.b{width:100%;max-width:400px;text-align:center;padding:30px 22px;border-radius:26px;background:rgba(127,29,29,.35);border:2px solid #ef4444;box-shadow:0 0 60px rgba(239,68,68,.45);animation:p 1.6s ease-in-out infinite}
+@keyframes p{50%{box-shadow:0 0 90px rgba(239,68,68,.75)}}
+.i{width:74px;height:74px;margin:0 auto 14px;border-radius:50%;background:#ef4444;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800}
+h1{margin:0 0 8px;font-size:22px;letter-spacing:.06em}p{margin:6px 0;color:#fecaca}.s{margin-top:16px;font-size:12px;color:#fca5a5}</style></head>
+<body><div class=b><div class=i>!</div><h1>ACCESS BLOCKED</h1>
+<p><b>{{msg or 'This device is not authorised.'}}</b></p>
+<p>Login is not available from this device. If this is your own device, contact the admin.</p>
+<div class=s>Device ID not recognised &middot; {{BRAND}}</div></div></body></html>"""
+
+T["security.html"] = r"""{% extends 'rbase.html' %}{% block c %}
+<div class=hd>{{ic('shield2',24)}} SECURITY</div>
+
+<div class=card><h3>{{ic('send',20)}} Telegram</h3>
+{% if tg_mask %}<span class="pill a">Linked</span> <span class=mu>Chat ID {{tg_mask}}</span>
+{% else %}<span class="pill e">Not linked</span><div class=mu style="margin-top:6px">Open the bot, press <b>Start</b>, copy your Chat ID and give it to the admin.</div>{% endif %}
+{% if not bot_ready %}<div class=hint>The bot is not set up by admin yet.</div>{% endif %}</div>
+
+<div class=card><h3>{{ic('lock',20)}} Login verification code</h3>
+<div class=mu>When ON, a 6-digit code is sent to your Telegram after you enter username &amp; password.</div>
+<div style="margin:10px 0">{% if r.otp_on %}<span class="pill a">ON</span>{% else %}<span class="pill e">OFF</span>{% endif %}</div>
+{% if r.otp_on %}<form method=post class=row onsubmit="return confirm('Turn OFF login verification?')"><input type=hidden name=action value=otp_off>
+<input type=password name=password placeholder="Your password to confirm" required style="flex:1;min-width:160px"><button class=r>Turn OFF</button></form>
+{% else %}<form method=post><input type=hidden name=action value=otp_on><button class=g {{'disabled' if not tg_mask}}>Turn ON</button></form>{% endif %}</div>
+
+<div class=card><h3>{{ic('bell',20)}} Telegram alerts</h3>
+<form method=post><input type=hidden name=action value=alerts>
+<label class=mu style="display:flex;gap:8px;align-items:center"><input type=checkbox name=notify value=1 {{'checked' if r.notify}} style="width:auto"> Send me an alert for every purchase / balance added</label>
+<p class=mu style="margin:12px 0 4px">Low balance alert when wallet goes below ({{CURRENCY}}) &mdash; 0 = off</p>
+<input name=low_bal type=number step=any min=0 value="{{r.low_bal|money}}" style="width:140px">
+<div><button class=g style="margin-top:12px">{{ic('save',16)}} Save</button></div></form></div>
+
+<div class=card><h3>{{ic('phone',20)}} My devices</h3>
+<div class=mu>Only devices approved by admin can open the panel.</div>
+<div class=tw><table>{% for d in devs %}<tr><td>{{d.label}}<div class=mu>{{d.ip}}</div></td>
+<td>{% if d.status=='approved' %}<span class="pill a">Approved</span>{% elif d.status=='pending' %}<span class="pill c">Pending</span>{% else %}<span class="pill e">Rejected</span>{% endif %}{% if d.dev_id==cur_dev %} <span class="pill p">This device</span>{% endif %}
+<div class=mu>{% if d.last_seen %}Last used {{d.last_seen|dt}}{% endif %}</div></td>
+<td><form method=post onsubmit="return confirm('Remove this device?')"><input type=hidden name=action value=rm_device><input type=hidden name=id value="{{d.id}}"><button class="r cp" style="color:#fff">{{ic('trash',16)}}</button></form></td></tr>
+{% else %}<tr><td class=mu>No devices yet.</td></tr>{% endfor %}</table></div></div>{% endblock %}"""
+
+# ---- admin: Telegram + Devices pages, nav links
+T["abase.html"] = T["abase.html"].replace('<a href="/admin/gateway"',
+    '<a href="/admin/telegram" class="{{\'on\' if page==\'telegram\'}}">Telegram</a><a href="/admin/devices" class="{{\'on\' if page==\'devices\'}}">Devices</a><a href="/admin/gateway"', 1)
+
+T["admin_telegram.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic('send',24)}} Telegram Bot</h2>
+<div class=card><h3>Status</h3>
+{% if me %}<span class="pill a">Bot connected</span> <b>@{{me.username}}</b>{% elif has_token %}<span class="pill e">Token saved but Telegram rejected it</span>{% else %}<span class="pill e">Not set up</span>{% endif %}
+<div style="margin-top:8px">Device approval: {% if active %}<span class="pill a">ACTIVE</span>{% else %}<span class="pill p">OFF</span>{% endif %}
+<span class=mu> (active when bot token + your Chat ID are set and the switch below is on)</span></div></div>
+<div class=card><form method=post><input type=hidden name=action value=save>
+<p class=mu>Bot token (from @BotFather){% if has_token %} &mdash; saved (ends with <code>{{tail}}</code>). Leave empty to keep it.{% endif %}{% if env_tok %} <b>(set inside app.py / env, it wins)</b>{% endif %}</p>
+<input name=token type=password autocomplete=off placeholder="123456789:AAH..." style="width:100%">
+<p class=mu>Your (admin) Telegram Chat ID &mdash; or simply open the bot and send <code>/admin YOUR_ADMIN_PASSWORD</code> and it fills itself. Device requests come here{% if env_adm %} <b>(set inside app.py / env, it wins)</b>{% endif %}</p>
+<input name=admin_id value="{{admin_id}}" placeholder="e.g. 123456789" style="width:100%" inputmode=numeric>
+<label class=mu style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type=checkbox name=dev_check value=1 {{'checked' if dev_check}} style="width:auto"> Require admin approval for every new reseller device</label>
+<button class=g style="margin-top:12px">{{ic('save')}} Save</button></form></div>
+<div class=card><h3>Test</h3><form method=post><input type=hidden name=action value=test><button>{{ic('send')}} Send test message to me</button></form>
+<p class=hint>Open your bot in Telegram and press Start first, otherwise Telegram will not let the bot message you.</p></div>{% endblock %}"""
+
+T["admin_devices.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic('phone',24)}} Devices</h2>
+<div class="card tw"><table><tr><th>Reseller</th><th>Device</th><th>Status</th><th>Requested</th><th></th></tr>
+{% for d in rows %}<tr><td>{{d.username}}</td><td>{{d.label}}<div class=mu>{{d.ip}}</div></td>
+<td>{% if d.status=='approved' %}<span class="pill a">Approved</span>{% elif d.status=='pending' %}<span class="pill c">Pending</span>{% else %}<span class="pill e">Rejected</span>{% endif %}</td>
+<td>{{d.created|dt}}{% if d.last_seen %}<div class=mu>used {{d.last_seen|dt}}</div>{% endif %}</td>
+<td style="white-space:nowrap"><form method=post style="display:inline"><input type=hidden name=id value="{{d.id}}">
+{% if d.status!='approved' %}<button class=g name=action value=approve>Accept</button> {% endif %}{% if d.status!='denied' %}<button class=r name=action value=deny>Reject</button> {% endif %}
+<button class=o name=action value=delete onclick="return confirm('Remove this device record? (a rejected device becomes unblocked)')">{{ic('trash',16)}}</button></form></td></tr>
+{% else %}<tr><td colspan=5>No devices yet.</td></tr>{% endfor %}</table></div>{% endblock %}"""
+
+# ---- wallet: first listed amount is pre-selected (list is editable by admin)
+T["wallet.html"] = T["wallet.html"].replace("""{{'on' if a==500}}""", """{{'on' if loop.first}}""").replace('id=am value=500>', 'id=am value="{{amts[0]}}">')
+
+# ---- admin gateway: editable add-balance amounts
+T["admin_gateway.html"] = T["admin_gateway.html"].replace('<p class=mu>API Token',
+    '<p class=mu>Add-balance amounts shown to resellers (comma separated, e.g. <code>100, 200, 500, 1000</code>)</p><input name=amounts value="{{amounts}}" style="width:100%" inputmode=numeric>\n<p class=mu>API Token', 1)
+
+# ---- admin resellers: telegram id on create + column
+T["admin_resellers.html"] = T["admin_resellers.html"].replace(
+    '<input name=credit type=number step=any value=0 placeholder="Starting credit" style="width:140px">',
+    '<input name=credit type=number step=any value=0 placeholder="Starting credit" style="width:140px"><input name=tg_chat placeholder="Telegram Chat ID (optional)" inputmode=numeric style="width:210px">', 1
+).replace('<th>Keys</th><th>Status</th>', '<th>Keys</th><th>Telegram</th><th>Status</th>', 1
+).replace('<td>{{x.kc}}</td>', '<td>{{x.kc}}</td><td>{% if x.tg_chat %}<span class="pill a">Linked</span>{% else %}<span class=mu>-</span>{% endif %}</td>', 1
+).replace('colspan=5>No resellers', 'colspan=6>No resellers', 1)
+
+# ---- admin reseller manage: telegram + verification + devices
+T["admin_reseller.html"] = T["admin_reseller.html"].replace('<div class=card><h3>Change Password</h3>', r"""<div class=card><h3>{{ic('send',20)}} Telegram &amp; Security</h3>
+<form class=row method=post><input type=hidden name=action value=tg><input name=tg_chat value="{{r.tg_chat or ''}}" placeholder="Telegram Chat ID (empty = unlink)" inputmode=numeric style="min-width:220px"><button class=g>Save</button></form>
+<p class=hint>The reseller opens your bot, presses Start and sends you the Chat ID shown there.</p>
+<div style="margin-top:10px">Login code: {% if r.otp_on %}<span class="pill a">ON</span>{% else %}<span class="pill e">OFF</span>{% endif %}
+<form method=post style="display:inline"><input type=hidden name=action value=otp_toggle><button class=o style="margin-left:8px">Switch</button></form></div>
+{% if devs %}<div class=tw style="margin-top:10px"><table>{% for d in devs %}<tr><td>{{d.label}} <span class=mu>{{d.ip}}</span></td><td>{{d.status}}</td></tr>{% endfor %}</table></div><a href="/admin/devices">Manage devices &rarr;</a>{% endif %}</div>
+<div class=card><h3>Change Password</h3>""", 1)
+
+# ---- admin backup page: music has its own backup
+T["admin_backup.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic('save',24)}} Backup &amp; Restore</h2>
+<div class=card><h3>Download Backup</h3>
+<p class=mu>One file with products, plans, prices, resellers (balances, passwords, Telegram IDs, approved devices), keys, stock, settings (Main API, Gateway, Telegram bot). <b>Music is not inside</b> - it has its own backup below. Keep this file private.</p>
+<div class=mu>Now: {% for k,v in counts.items() %}{{k}} <b>{{v}}</b>{{ ' &middot; '|safe if not loop.last }}{% endfor %}</div>
+<a class=btn href="/admin/backup/download" style="margin-top:12px">{{ic('save')}} Download Backup</a></div>
+<div class=card><h3>Upload Backup (Restore)</h3>
+<p class=mu>Replaces ALL current data with the file (music is not touched). If the file is wrong, nothing changes.</p>
+<form method=post action="/admin/backup/restore" enctype=multipart/form-data onsubmit="return confirm('This will REPLACE all current data with the backup. Continue?')">
+<input type=file name=file accept=".json,application/json" required> <button class=r>{{ic('plus')}} Upload &amp; Restore</button></form></div>
+<div class=card><h3>{{ic('music',20)}} Music Backup</h3>
+<p class=mu>Songs now: <b>{{songs}}</b>{% if msize %} &middot; uploaded audio <b>{{msize}} MB</b>{% endif %}. One <code>.zip</code> with the song list and every uploaded audio file.</p>
+<a class=btn href="/admin/music/backup" style="margin-top:6px">{{ic('download')}} Download Music Backup</a></div>
+<div class=card><h3>Upload Music Backup (Restore)</h3>
+<p class=mu>All songs come back. The current music library is replaced.</p>
+<form method=post action="/admin/music/restore" enctype=multipart/form-data onsubmit="return confirm('Replace the current music with the backup?')">
+<input type=file name=file accept=".zip,application/zip" required> <button class=r>{{ic('plus')}} Upload &amp; Restore Music</button></form></div>{% endblock %}"""
+
+# music admin page note
+T["admin_music.html"] = T["admin_music.html"].replace("Free Render disk resets on redeploy, so direct URLs are safer than uploads.",
+    'Free Render disk resets on redeploy &mdash; take a <a href="/admin/backup">Music Backup</a> after adding songs and upload it again after a redeploy.')
 
 TEMPLATES = T

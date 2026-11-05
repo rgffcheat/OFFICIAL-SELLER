@@ -31,3 +31,15 @@ ADD BALANCE (UPI): fixed amounts 200/500/1000/1500/2000/2500 -> QR -> auto verif
 BROADCAST: Admin > Broadcast (one reseller or all). Resellers see it in sidebar > Broadcast (new-notice badge).
 COLOUR: palette button (top right) - saved per reseller, also applied on the login page.
 MUSIC: after reopening, the same song restarts from its beginning; backup now includes uploaded songs (backup file gets bigger).
+
+---- v6 ----
+TELEGRAM BOT (runs inside the website - tgbot.py, no separate hosting)
+  1. The bot token is already inside app.py (TG_BOT_TOKEN at the top). Keep the GitHub repo PRIVATE.
+  2. Open your bot in Telegram and send:  /admin 909090   (your admin password) -> you become the admin. Nothing else to set.
+  3. Reseller opens the bot, presses Start, sends you his Chat ID -> Admin > Resellers (create form or Manage).
+LOGIN: username + password -> (new device: admin gets Accept/Reject in Telegram) -> 6-digit code in Telegram -> dashboard.
+  Reseller > Security: login code ON/OFF, alerts, low-balance limit, own devices. Rejected device sees only a red ACCESS BLOCKED page.
+  Admin > Devices: accept / reject / remove any device.
+ALERTS: NEW PURCHASE ALERT (panel + API), LOW BALANCE ALERT, BALANCE ADDED.
+ADD BALANCE AMOUNTS: Admin > Gateway > "Add-balance amounts" (e.g. 100, 300, 500).
+BACKUP: music now has its OWN backup (Admin > Backup > Music Backup .zip). The normal backup no longer contains music.
