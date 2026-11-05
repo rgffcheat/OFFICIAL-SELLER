@@ -102,3 +102,11 @@ BOT MAKER (v10.5)
 - Admin can view status, restart/delete the bot, download its SQLite DB, and upload a verified DB restore.
 - Requires a paid Render web service with a persistent disk mounted at /var/data. One Gunicorn worker is intentional because child bot processes are managed by that worker.
 - Render free instances do not provide persistent disks and are not suitable for this process manager.
+
+
+---- v10.7 BOT MAKER FIX ----
+- Old bug: bot was killed if it needed more than 20 s to start (Render is slow) and the 60 s supervisor then restarted it again and again -> never "running".
+- Now: bot starts in background, waits up to 5 minutes, NEVER killed early. Reseller page shows a live progress bar and turns green "Bot running successfully" (usually 60-90 s).
+- Token is checked immediately (wrong token = instant clear error). Website's own token / duplicate tokens are refused.
+- Supervisor never starts a bot that is already starting (no double bots / Telegram 409), kills orphan copies after a web restart, stops after 5 crashes in a row.
+- Admin restart/restore also run in background.

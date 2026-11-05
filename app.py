@@ -1,4 +1,4 @@
-import os, re, json, sqlite3, secrets, time, threading, base64, hmac, hashlib, zipfile, tempfile, subprocess, shutil, signal, uuid
+import os, sys, re, json, sqlite3, secrets, time, threading, base64, hmac, hashlib, zipfile, tempfile, subprocess, shutil, signal, uuid
 import html as _html
 import requests
 from flask import (Flask, request, session, redirect, render_template, flash,
@@ -126,6 +126,8 @@ def _botmaker_migrate():
       updated_at INTEGER NOT NULL DEFAULT 0, last_error TEXT DEFAULT ''
     );
     """)
+    if "bot_username" not in [x[1] for x in c.execute("PRAGMA table_info(reseller_bots)")]:
+        c.execute("ALTER TABLE reseller_bots ADD COLUMN bot_username TEXT DEFAULT ''")
     c.commit(); c.close()
 
 _botmaker_migrate()
@@ -184,61 +186,147 @@ def _botmaker_clone_db(dst_path, admin_id, bot_name):
         dst.close(); src.close()
 
 def _botmaker_token_valid(token):
-    rr = requests.get('https://api.telegram.org/bot%s/getMe' % token, timeout=12)
-    data = rr.json() if rr.content else {}
-    if rr.status_code != 200 or not data.get('ok'):
-        raise ValueError('Telegram Bot Token could not be verified. Check the token from BotFather.')
-    return data.get('result') or {}
+    """Returns Telegram bot info. Raises ValueError ONLY when Telegram says the token is wrong.
+    A slow / unreachable Telegram is not treated as a bad token (the bot process retries by itself)."""
+    try:
+        rr = requests.get('https://api.telegram.org/bot%s/getMe' % token, timeout=8)
+    except requests.RequestException:
+        return {}
+    try: data = rr.json()
+    except Exception: data = {}
+    if rr.status_code in (401, 404) or (isinstance(data, dict) and data.get('ok') is False and rr.status_code < 500):
+        raise ValueError('Telegram Bot Token is wrong. Copy the token again from @BotFather.')
+    return (data.get('result') or {}) if isinstance(data, dict) else {}
 
-def _botmaker_start(instance_id, instance_dir, token, admin_id, bot_name):
+_BOT_STARTING = set()          # instance_ids that are being started right now
+_BOT_FAILS = {}                # instance_id -> consecutive failed starts (supervisor gives up after 5)
+_BOT_LAST_START = {}           # instance_id -> time of last launch
+BOT_READY_TIMEOUT = 300        # seconds a slow Render machine may take to import the bot (never killed earlier)
+
+def _bm_db_status(instance_id, status, err='', **extra):
+    sets = "status=?,last_error=?,updated_at=?"; args = [status, err[:1500], int(time.time())]
+    for k, v in extra.items():
+        sets += ",%s=?" % k; args.append(v)
+    args.append(instance_id)
+    try: q("UPDATE reseller_bots SET %s WHERE instance_id=?" % sets, tuple(args), commit=True)
+    except Exception as e: print('[BOT MAKER] db status failed', str(e)[:200])
+
+def _botmaker_kill_pid(pid):
+    try: os.killpg(int(pid), signal.SIGTERM)
+    except Exception:
+        try: os.kill(int(pid), signal.SIGTERM)
+        except Exception: return
+    for _ in range(30):
+        try: os.kill(int(pid), 0)
+        except Exception: return
+        time.sleep(.2)
+    try: os.killpg(int(pid), signal.SIGKILL)
+    except Exception:
+        try: os.kill(int(pid), signal.SIGKILL)
+        except Exception: pass
+
+def _botmaker_kill_orphan(instance_dir):
+    """A previous web worker may have left the child running (new session). Kill it so two copies never poll one token."""
+    pf = os.path.join(instance_dir, '.bot_pid')
+    try: pid = int(open(pf).read().strip())
+    except Exception: return
+    try:
+        if os.path.realpath('/proc/%d/cwd' % pid) == os.path.realpath(instance_dir):
+            _botmaker_kill_pid(pid)
+    except Exception: pass
+
+def _botmaker_spawn(instance_id, instance_dir, token, admin_id, bot_name):
+    """Starts the child process and returns IMMEDIATELY (never waits, never kills a slow starter)."""
     main_path = os.path.join(BOT_RUNTIME_SOURCE, 'main.py')
     if not os.path.isfile(main_path): raise RuntimeError('Main bot runtime is missing.')
     child_main = os.path.join(instance_dir, 'main.py')
-    if not os.path.isfile(child_main): shutil.copy2(main_path, child_main)
-    env = {k:v for k,v in os.environ.items() if k in ('PATH','PYTHONPATH','HOME','TMP','TEMP','TZ','LANG','SSL_CERT_FILE','REQUESTS_CA_BUNDLE')}
-    env.update({'BOT_TOKEN':token,'BOT_ADMIN_IDS':str(int(admin_id)),'BOT_BRAND_NAME':bot_name,
-      'BOT_CREATOR_ENABLED':'0','BOT_INSTANCE_ID':instance_id,'BOT_INSTANCES_DIR':BOT_INSTANCES_ROOT,
-      'BOT_DB_PATH':os.path.join(instance_dir,'shop_data.db'),'BOT_TELEGRAM_WORKERS':'4',
-      'USER_TASK_WORKERS':'4','PAYMENT_TASK_WORKERS':'2','HTTP_POOL_SIZE':'8','PYTHONUNBUFFERED':'1'})
-    env['BOT_CHILD_HTTP_PORT'] = str(21000 + (int(instance_id[:6],16) % 20000))
-    envfile=os.path.join(instance_dir,'.bot_env.json')
-    with open(envfile,'w',encoding='utf-8') as f: json.dump(env,f)
-    try: os.chmod(envfile,0o600)
-    except Exception: pass
-    log=open(os.path.join(instance_dir,'bot.log'),'a',encoding='utf-8')
-    proc=subprocess.Popen([os.sys.executable,'-u',child_main],cwd=instance_dir,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-    with _BOT_PROC_LOCK: _BOT_PROCS[instance_id]=proc
-    ready=os.path.join(instance_dir,'.bot_ready')
-    deadline=time.time()+20
-    while time.time()<deadline:
-        if proc.poll() is not None:
-            try: tail=open(os.path.join(instance_dir,'bot.log'),encoding='utf-8',errors='replace').read()[-1800:]
-            except Exception: tail=''
-            with _BOT_PROC_LOCK: _BOT_PROCS.pop(instance_id,None)
-            raise RuntimeError('Bot stopped during startup. '+tail)
-        if os.path.isfile(ready): return proc
-        time.sleep(.35)
-    # Some hosting environments take longer to import the bot; keep it running,
-    # but don't claim readiness unless the marker was written.
-    try: proc.terminate(); proc.wait(timeout=4)
-    except Exception:
-        try: proc.kill()
+    shutil.copy2(main_path, child_main)            # always latest runtime
+    _botmaker_stop(instance_id)
+    _botmaker_kill_orphan(instance_dir)
+    for f in ('.bot_ready', '.rg_cheat_shop_polling.lock'):
+        try: os.remove(os.path.join(instance_dir, f))
         except Exception: pass
-    with _BOT_PROC_LOCK: _BOT_PROCS.pop(instance_id,None)
-    raise RuntimeError('Bot is still starting and did not report ready within 20 seconds. Check bot.log.')
+    env = {k: v for k, v in os.environ.items() if k in ('PATH','PYTHONPATH','HOME','TMP','TEMP','TZ','LANG','SSL_CERT_FILE','REQUESTS_CA_BUNDLE','LD_LIBRARY_PATH','VIRTUAL_ENV')}
+    env.update({'BOT_TOKEN': token, 'BOT_ADMIN_IDS': str(int(admin_id)), 'BOT_BRAND_NAME': bot_name,
+      'BOT_CREATOR_ENABLED': '0', 'BOT_INSTANCE_ID': instance_id, 'BOT_INSTANCES_DIR': BOT_INSTANCES_ROOT,
+      'BOT_DB_PATH': os.path.join(instance_dir, 'shop_data.db'), 'BOT_TELEGRAM_WORKERS': '4',
+      'USER_TASK_WORKERS': '4', 'PAYMENT_TASK_WORKERS': '2', 'HTTP_POOL_SIZE': '8', 'PYTHONUNBUFFERED': '1'})
+    env['BOT_CHILD_HTTP_PORT'] = str(21000 + (int(instance_id[:6], 16) % 20000))
+    envfile = os.path.join(instance_dir, '.bot_env.json')
+    with open(envfile, 'w', encoding='utf-8') as f: json.dump(env, f)
+    try: os.chmod(envfile, 0o600)
+    except Exception: pass
+    log = open(os.path.join(instance_dir, 'bot.log'), 'a', encoding='utf-8')
+    log.write('\n===== start %s =====\n' % time.strftime('%Y-%m-%d %H:%M:%S')); log.flush()
+    proc = subprocess.Popen([sys.executable, '-u', child_main], cwd=instance_dir, env=env,
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    try: open(os.path.join(instance_dir, '.bot_pid'), 'w').write(str(proc.pid))
+    except Exception: pass
+    with _BOT_PROC_LOCK: _BOT_PROCS[instance_id] = proc
+    return proc
+
+def _botmaker_log_tail(instance_dir, n=1200):
+    try: return open(os.path.join(instance_dir, 'bot.log'), encoding='utf-8', errors='replace').read()[-n:]
+    except Exception: return ''
+
+def _botmaker_launch_worker(instance_id):
+    """Background: start child, wait (up to BOT_READY_TIMEOUT) for the ready marker, record result."""
+    ok = False
+    try:
+        row = q('SELECT * FROM reseller_bots WHERE instance_id=?', (instance_id,), one=True)
+        if not row: return
+        idir = row['instance_dir']
+        envp = os.path.join(idir, '.bot_env.json')
+        token = json.load(open(envp, encoding='utf-8')).get('BOT_TOKEN', '')
+        if not token: raise RuntimeError('Saved bot token is missing. Delete the bot and create it again.')
+        _bm_db_status(instance_id, 'starting', '')
+        _BOT_LAST_START[instance_id] = time.time()
+        proc = _botmaker_spawn(instance_id, idir, token, row['admin_id'], row['bot_name'])
+        ready = os.path.join(idir, '.bot_ready')
+        deadline = time.time() + BOT_READY_TIMEOUT
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                with _BOT_PROC_LOCK: _BOT_PROCS.pop(instance_id, None)
+                raise RuntimeError('Bot stopped during startup. ' + _botmaker_log_tail(idir))
+            if os.path.isfile(ready):
+                ok = True; break
+            if not q('SELECT 1 FROM reseller_bots WHERE instance_id=?', (instance_id,), one=True):
+                return   # deleted meanwhile
+            time.sleep(.5)
+        if not ok:
+            raise RuntimeError('Bot is taking too long to start (over %d s). Press Restart. ' % BOT_READY_TIMEOUT + _botmaker_log_tail(idir, 600))
+        _BOT_FAILS[instance_id] = 0
+        _bm_db_status(instance_id, 'running', '')
+    except Exception as e:
+        _BOT_FAILS[instance_id] = _BOT_FAILS.get(instance_id, 0) + 1
+        _bm_db_status(instance_id, 'error', str(e))
+        print('[BOT MAKER]', instance_id, str(e)[:600])
+    finally:
+        with _BOT_PROC_LOCK: _BOT_STARTING.discard(instance_id)
+
+def _botmaker_launch_async(instance_id, reset_fails=False):
+    """Safe to call from anywhere; returns False if this bot is already being started."""
+    with _BOT_PROC_LOCK:
+        if instance_id in _BOT_STARTING: return False
+        _BOT_STARTING.add(instance_id)
+    if reset_fails: _BOT_FAILS[instance_id] = 0
+    _bm_db_status(instance_id, 'starting', '')
+    threading.Thread(target=_botmaker_launch_worker, args=(instance_id,), daemon=True, name='bot-start-' + instance_id).start()
+    return True
 
 def _botmaker_stop(instance_id):
-    with _BOT_PROC_LOCK: proc=_BOT_PROCS.pop(str(instance_id),None)
+    with _BOT_PROC_LOCK: proc = _BOT_PROCS.pop(str(instance_id), None)
     if proc and proc.poll() is None:
-        try: proc.terminate(); proc.wait(timeout=8)
-        except Exception:
-            try: proc.kill()
-            except Exception: pass
+        _botmaker_kill_pid(proc.pid)
+        try: proc.wait(timeout=3)
+        except Exception: pass
 
 def _botmaker_status(instance_id, instance_dir):
-    with _BOT_PROC_LOCK: proc=_BOT_PROCS.get(str(instance_id))
-    if proc is not None: return 'running' if proc.poll() is None else 'stopped'
-    # A process not owned by this web worker is not assumed to be running.
+    with _BOT_PROC_LOCK:
+        starting = str(instance_id) in _BOT_STARTING
+        proc = _BOT_PROCS.get(str(instance_id))
+    if starting: return 'starting'
+    if proc is not None and proc.poll() is None: return 'running'
     return 'stopped'
 
 
@@ -677,18 +765,6 @@ def admin_required(f):
 
 
 
-def _botmaker_create_worker(reseller_id, instance_id, instance_dir, token, admin_id, bot_name):
-    try:
-        _botmaker_token_valid(token)
-        proc=_botmaker_start(instance_id,instance_dir,token,admin_id,bot_name)
-        q("UPDATE reseller_bots SET status='running',updated_at=?,last_error='' WHERE instance_id=?",
-          (int(time.time()),instance_id),commit=True)
-    except Exception as e:
-        q("UPDATE reseller_bots SET status='error',last_error=?,updated_at=? WHERE instance_id=?",
-          (str(e)[:1200],int(time.time()),instance_id),commit=True)
-        print('[BOT MAKER CREATE]',instance_id,str(e)[:1200])
-
-
 @app.route('/bot-maker', methods=['GET','POST'])
 @reseller_required
 def reseller_bot_maker():
@@ -701,9 +777,20 @@ def reseller_bot_maker():
             flash('You already created your one allowed bot. Contact admin to reset it.','err')
             return redirect('/bot-maker')
         name=request.form.get('bot_name','').strip(); token=request.form.get('bot_token','').strip(); aid=request.form.get('admin_id','').strip()
-        if not name or len(name)>64 or not re.fullmatch(r'\d{5,15}',aid) or ':' not in token:
-            flash('Enter a bot name, valid BotFather token and numeric Telegram Admin ID.','err')
+        if not name or len(name)>64 or not re.fullmatch(r'\d{5,15}',aid) or not re.fullmatch(r'\d{6,12}:[A-Za-z0-9_-]{30,}',token):
+            flash('Enter a bot name, a valid BotFather token (like 123456:ABC...) and the numeric Telegram Admin ID.','err')
             return redirect('/bot-maker')
+        if token==TG_BOT_TOKEN:
+            flash('This is the website\'s own bot token. Create a NEW bot in @BotFather and use its token.','err')
+            return redirect('/bot-maker')
+        for orow in q('SELECT instance_dir FROM reseller_bots'):
+            try:
+                if json.load(open(os.path.join(orow['instance_dir'],'.bot_env.json'),encoding='utf-8')).get('BOT_TOKEN')==token:
+                    flash('This bot token is already used by another bot.','err'); return redirect('/bot-maker')
+            except Exception: pass
+        try: info=_botmaker_token_valid(token)
+        except ValueError as e:
+            flash(str(e),'err'); return redirect('/bot-maker')
         instance_id=secrets.token_hex(8); idir=os.path.join(BOT_INSTANCES_ROOT,instance_id)
         try:
             os.makedirs(idir,exist_ok=False)
@@ -714,36 +801,35 @@ def reseller_bot_maker():
                 json.dump({'BOT_TOKEN':token},f)
             try: os.chmod(envfile,0o600)
             except Exception: pass
-            q('INSERT INTO reseller_bots(reseller_id,bot_name,admin_id,instance_id,instance_dir,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
-              (r['id'],name,int(aid),instance_id,idir,'queued',int(time.time()),int(time.time())),commit=True)
-            # Do not perform Telegram HTTP checks or wait for child startup inside the
-            # Gunicorn request. The old synchronous path blocked the whole web request
-            # for up to 35 seconds (or longer on slow Render instances).
-            threading.Thread(target=_botmaker_create_worker,
-                args=(r['id'],instance_id,idir,token,int(aid),name),daemon=True,
-                name='bot-create-'+instance_id).start()
-            flash('Bot creation queued. Refresh in 10–20 seconds to see its status.','ok')
+            q('INSERT INTO reseller_bots(reseller_id,bot_name,admin_id,instance_id,instance_dir,status,created_at,updated_at,bot_username) VALUES(?,?,?,?,?,?,?,?,?)',
+              (r['id'],name,int(aid),instance_id,idir,'starting',int(time.time()),int(time.time()),str(info.get('username') or '')),commit=True)
+            _botmaker_launch_async(instance_id,reset_fails=True)
+            flash('Bot is being created. It will be running in about 1 to 1.5 minutes.','ok')
         except Exception as e:
             try: shutil.rmtree(idir,ignore_errors=True)
             except Exception: pass
-            flash('Could not queue bot creation: '+str(e)[:300],'err')
+            flash('Could not create bot: '+str(e)[:300],'err')
         return redirect('/bot-maker')
     status=_botmaker_status(b['instance_id'],b['instance_dir']) if b else 'not-created'
     return render_template('bot_maker.html',r=r,b=b,status=status,page='botmaker')
+
+@app.route('/bot-maker/status')
+@reseller_required
+def reseller_bot_status():
+    b=q('SELECT * FROM reseller_bots WHERE reseller_id=?',(request.r['id'],),one=True)
+    if not b: return jsonify(status='not-created')
+    st=_botmaker_status(b['instance_id'],b['instance_dir'])
+    return jsonify(status=st,error=(b['last_error'] or '') if st!='running' else '',
+                   username=b['bot_username'] or '',name=b['bot_name'],
+                   elapsed=int(time.time()-(_BOT_LAST_START.get(b['instance_id']) or b['updated_at'] or time.time())))
 
 @app.route('/bot-maker/restart',methods=['POST'])
 @reseller_required
 def reseller_bot_restart():
     b=q('SELECT * FROM reseller_bots WHERE reseller_id=?',(request.r['id'],),one=True)
     if not b: abort(404)
-    try:
-        _botmaker_stop(b['instance_id'])
-        env=json.load(open(os.path.join(b['instance_dir'],'.bot_env.json'),encoding='utf-8'))
-        proc=_botmaker_start(b['instance_id'],b['instance_dir'],env['BOT_TOKEN'],b['admin_id'],b['bot_name'])
-        q("UPDATE reseller_bots SET status='running',updated_at=?,last_error='' WHERE id=?",(int(time.time()),b['id']),commit=True)
-        flash('Bot restart requested.','ok')
-    except Exception as e:
-        q("UPDATE reseller_bots SET status='error',last_error=?,updated_at=? WHERE id=?",(str(e)[:500],int(time.time()),b['id']),commit=True); flash('Restart failed: '+str(e)[:300],'err')
+    if _botmaker_launch_async(b['instance_id'],reset_fails=True): flash('Bot is restarting. It will be running in about 1 minute.','ok')
+    else: flash('Bot is already starting, please wait.','ok')
     return redirect('/bot-maker')
 
 @app.route('/admin/reseller/<int:rid>/bot/<action>',methods=['GET','POST'])
@@ -754,13 +840,11 @@ def admin_reseller_bot_action(rid,action):
     if action=='backup' and request.method!='GET': abort(405)
     if action in ('restart','delete') and request.method!='POST': abort(405)
     if action=='restart':
-        try:
-            _botmaker_stop(b['instance_id']); env=json.load(open(os.path.join(b['instance_dir'],'.bot_env.json'),encoding='utf-8'))
-            _botmaker_start(b['instance_id'],b['instance_dir'],env['BOT_TOKEN'],b['admin_id'],b['bot_name'])
-            q("UPDATE reseller_bots SET status='running',updated_at=?,last_error='' WHERE id=?",(int(time.time()),b['id']),commit=True); flash('Reseller bot restarted.','ok')
-        except Exception as e: flash('Restart failed: '+str(e)[:300],'err')
+        if _botmaker_launch_async(b['instance_id'],reset_fails=True): flash('Reseller bot is restarting (about 1 minute).','ok')
+        else: flash('Bot is already starting.','ok')
     elif action=='delete':
-        _botmaker_stop(b['instance_id']); q('DELETE FROM reseller_bots WHERE id=?',(b['id'],),commit=True); shutil.rmtree(b['instance_dir'],ignore_errors=True); flash('Reseller bot deleted.','ok')
+        _botmaker_stop(b['instance_id']); _botmaker_kill_orphan(b['instance_dir'])
+        q('DELETE FROM reseller_bots WHERE id=?',(b['id'],),commit=True); shutil.rmtree(b['instance_dir'],ignore_errors=True); flash('Reseller bot deleted.','ok')
     elif action=='backup':
         dbfile=os.path.join(b['instance_dir'],'shop_data.db')
         if not os.path.isfile(dbfile): flash('Bot database file is missing.','err')
@@ -779,9 +863,8 @@ def admin_reseller_bot_restore(rid):
         test=sqlite3.connect(tmp); ok=test.execute("PRAGMA quick_check").fetchone()[0]=='ok'; test.close()
         if not ok: raise ValueError('SQLite integrity check failed')
         _botmaker_stop(b['instance_id']); os.replace(tmp,os.path.join(b['instance_dir'],'shop_data.db'))
-        env=json.load(open(os.path.join(b['instance_dir'],'.bot_env.json'),encoding='utf-8'))
-        _botmaker_start(b['instance_id'],b['instance_dir'],env['BOT_TOKEN'],b['admin_id'],b['bot_name'])
-        q("UPDATE reseller_bots SET status='running',updated_at=?,last_error='' WHERE id=?",(int(time.time()),b['id']),commit=True); flash('Database restored and bot restarted.','ok')
+        _botmaker_launch_async(b['instance_id'],reset_fails=True)
+        flash('Database restored. Bot is restarting.','ok')
     except Exception as e:
         try: os.remove(tmp)
         except Exception: pass
@@ -789,43 +872,27 @@ def admin_reseller_bot_restore(rid):
     return redirect('/admin/reseller/%d'%rid)
 
 
-
-
-def _botmaker_recover_existing():
-    try:
-        rows=q("SELECT * FROM reseller_bots",())
-        for row in rows:
-            try:
-                envpath=os.path.join(row['instance_dir'],'.bot_env.json')
-                if not os.path.isfile(envpath): continue
-                env=json.load(open(envpath,encoding='utf-8'))
-                proc=_botmaker_start(row['instance_id'],row['instance_dir'],env.get('BOT_TOKEN',''),row['admin_id'],row['bot_name'])
-                q("UPDATE reseller_bots SET status=?,updated_at=? WHERE id=?",('running' if proc.poll() is None else 'error',int(time.time()),row['id']),commit=True)
-            except Exception as e:
-                q("UPDATE reseller_bots SET status='error',last_error=?,updated_at=? WHERE id=?",(str(e)[:500],int(time.time()),row['id']),commit=True)
-    except Exception as e:
-        print('[BOT MAKER RECOVERY]',str(e)[:500])
-
-threading.Thread(target=_botmaker_recover_existing,daemon=True,name='reseller-bot-recovery').start()
-
 def _botmaker_supervisor():
+    """Boot recovery + keeps bots alive. Never touches a bot that is currently starting; gives up after 5 crashes in a row."""
+    time.sleep(3)
     while True:
-        time.sleep(60)
         try:
-            rows=q("SELECT * FROM reseller_bots",())
-            for row in rows:
-                try:
-                    with _BOT_PROC_LOCK: proc=_BOT_PROCS.get(row['instance_id'])
-                    if proc is not None and proc.poll() is None: continue
-                    envpath=os.path.join(row['instance_dir'],'.bot_env.json')
-                    if not os.path.isfile(envpath): continue
-                    env=json.load(open(envpath,encoding='utf-8'))
-                    _botmaker_start(row['instance_id'],row['instance_dir'],env.get('BOT_TOKEN',''),row['admin_id'],row['bot_name'])
-                    q("UPDATE reseller_bots SET status='running',updated_at=?,last_error='' WHERE id=?",(int(time.time()),row['id']),commit=True)
-                except Exception as e:
-                    q("UPDATE reseller_bots SET status='error',last_error=?,updated_at=? WHERE id=?",(str(e)[:500],int(time.time()),row['id']),commit=True)
+            for row in q("SELECT * FROM reseller_bots",()):
+                iid=row['instance_id']
+                with _BOT_PROC_LOCK:
+                    if iid in _BOT_STARTING: continue
+                    proc=_BOT_PROCS.get(iid)
+                if proc is not None and proc.poll() is None:
+                    if row['status']!='running' and os.path.isfile(os.path.join(row['instance_dir'],'.bot_ready')):
+                        _bm_db_status(iid,'running','')
+                    continue
+                if not os.path.isfile(os.path.join(row['instance_dir'],'.bot_env.json')): continue
+                if _BOT_FAILS.get(iid,0)>=5: continue
+                if time.time()-_BOT_LAST_START.get(iid,0)<45: continue
+                _botmaker_launch_async(iid)
         except Exception as e:
             print('[BOT MAKER SUPERVISOR]',str(e)[:500])
+        time.sleep(20)
 
 threading.Thread(target=_botmaker_supervisor,daemon=True,name='reseller-bot-supervisor').start()
 

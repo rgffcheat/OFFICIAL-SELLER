@@ -780,8 +780,20 @@ TEMPLATES = T
 
 T["bot_maker.html"] = r"""{% extends 'rbase.html' %}{% block c %}
 <div class=hd>🤖 BOT MAKER</div>
-{% if b %}<div class=card><h3>{{b.bot_name}}</h3><p class=mu>Bot Admin ID: <code>{{b.admin_id}}</code></p><p>Status: {% if status=='running' %}<span class="pill a">RUNNING</span>{% else %}<span class="pill e">{{status|upper}}</span>{% endif %}</p>
+{% if b %}<div class=card><h3>{{b.bot_name}}</h3><p class=mu>Bot Admin ID: <code>{{b.admin_id}}</code>{% if b.bot_username %} · <a href="https://t.me/{{b.bot_username}}" target=_blank>@{{b.bot_username}}</a>{% endif %}</p>
+<p>Status: <span id=bmpill class="pill e">{{status|upper}}</span></p>
+<div id=bmprog style="display:none;margin:12px 0"><div style="height:10px;border-radius:6px;background:#2a2a3a;overflow:hidden"><div id=bmbar style="height:100%;width:3%;background:#22c55e;transition:width .8s"></div></div><p class=mu id=bmtxt style="margin-top:6px">Creating your bot... please wait</p></div>
+<div id=bmok style="display:none;margin:10px 0;color:#22c55e;font-weight:700">✅ Bot running successfully! Open your bot in Telegram and send /start.</div>
+<pre id=bmerr style="display:none;white-space:pre-wrap;max-height:180px;overflow:auto;font-size:11px;color:#f87171"></pre>
 <form method=post action="/bot-maker/restart"><button class=g>Restart My Bot</button></form><p class=hint>One bot per reseller. To replace this bot, contact website admin.</p></div>
+<script>(function(){var pill=document.getElementById('bmpill'),prog=document.getElementById('bmprog'),bar=document.getElementById('bmbar'),txt=document.getElementById('bmtxt'),ok=document.getElementById('bmok'),er=document.getElementById('bmerr');
+function paint(d){var s=d.status;pill.textContent=s.toUpperCase();pill.className='pill '+(s=='running'?'a':'e');
+prog.style.display=s=='starting'?'block':'none';ok.style.display=s=='running'?'block':'none';
+if(s=='starting'){var e=d.elapsed||0;bar.style.width=Math.min(95,3+e*1.05)+'%';txt.textContent='Creating your bot... '+e+'s (usually 60-90 seconds)';}
+if(s=='running')bar.style.width='100%';
+if(s!='running'&&s!='starting'&&d.error){er.style.display='block';er.textContent=d.error}else{er.style.display='none'}}
+function poll(){fetch('/bot-maker/status',{credentials:'same-origin'}).then(function(r){return r.json()}).then(function(d){paint(d);setTimeout(poll,d.status=='starting'?2500:8000)}).catch(function(){setTimeout(poll,5000)})}
+poll()})();</script>
 {% else %}<div class=card><h3>Create your Telegram bot</h3><p class=mu>Only one bot can be created per reseller. Get a token from @BotFather.</p>
 <form method=post><label>Bot Name</label><input name=bot_name maxlength=64 required placeholder="Your shop name" style="width:100%">
 <label style="display:block;margin-top:12px">BotFather API Token</label><input name=bot_token type=password autocomplete=off required placeholder="123456:ABC..." style="width:100%">
