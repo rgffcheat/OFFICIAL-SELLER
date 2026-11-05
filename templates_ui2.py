@@ -136,6 +136,7 @@ T["rbase.html"] = HEAD + """Reseller Panel</title><style>""" + CSS2 + """</style
 <a href="/security" class="{{'on' if page=='security'}}">{{ic('shield2')}} Security</a>
 <a href="/broadcast" class="{{'on' if page=='broadcast'}}">{{ic('bell')}} Broadcast{% if unread and page!='broadcast' %}<span class=badge>{{unread}}</span>{% endif %}</a>
 <a href="/api-docs" class="{{'on' if page=='api'}}">{{ic('code')}} API &amp; Docs</a>
+<a href="/settings" class="{{'on' if page=='settings'}}">{{ic('tool')}} Settings</a>
 <a href="/logout">{{ic('logout')}} Logout</a></div>
 <div class="top"><button class="iconbtn" id=bg aria-label="Menu">{{ic('menu',22)}}</button>
 <div class="player" id=pl><button id=pv aria-label="Previous">{{ic('prev',16)}}</button><button id=pp aria-label="Play">{{ic('play',16)}}</button><button id=nx aria-label="Next">{{ic('next',16)}}</button><span id=ttl>…</span><audio id=au preload=auto></audio></div>
@@ -487,4 +488,47 @@ T["admin_backup.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic('sa
 T["admin_music.html"] = T["admin_music.html"].replace("Free Render disk resets on redeploy, so direct URLs are safer than uploads.",
     'Free Render disk resets on redeploy &mdash; take a <a href="/admin/backup">Music Backup</a> after adding songs and upload it again after a redeploy.')
 
+# ---------------------------------------------------------------- v10: Sold Keys page, credit add/deduct, reseller settings
+T["admin_keys.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>Sold Keys</h2>
+<div class=card><input id=ksq placeholder="Search reseller, key, product, date..." autocomplete=off style="width:100%">
+<div class=mu style="margin:8px 0"><span id=kshown>{{rows|length}}</span> of {{rows|length}} newest keys shown</div>
+<button class=g id=kall>{{ic('copy',16)}} Copy all shown keys</button></div>
+<style>.kc{border:1px solid var(--bd);border-radius:16px;padding:14px;margin:10px 0;background:rgba(255,255,255,.03)}
+.kc .t{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap}
+.kc .kb{margin-top:10px;display:flex;gap:8px;align-items:stretch}
+.kc .kv{flex:1;min-width:0;font:600 15px/1.4 ui-monospace,Consolas,monospace;word-break:break-all;overflow-wrap:anywhere;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.35);border:1px solid var(--bd);user-select:all;-webkit-user-select:all}
+.kc .kcp{flex:none;padding:0 14px!important}.kc .m{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:13px}</style>
+<div id=klist>{% for x in rows %}<div class=kc data-s="{{(x.username~' '~x.key~' '~x.product_name~' '~x.plan_name~' '~(x.via or '')~' '~(x.created|dt))|lower}}" data-k="{{x.key}}">
+<div class=t><b style="font-size:16px">{{x.username}}</b><span>{% if x.expires>now %}<span class="pill a">Active</span>{% else %}<span class="pill e">Expired</span>{% endif %}</span></div>
+<div style="margin-top:6px"><b>{{x.product_name}}</b> <span class=mu>&middot; {{x.plan_name}}</span></div>
+<div class=kb><div class=kv>{{x.key}}</div><button class="o kcp" data-kcopy="{{x.key}}" aria-label="Copy key">{{ic('copy',18)}}</button></div>
+<div class="m mu"><span>{{x.price|cur}}</span><span>{{(x.via or 'panel')|upper}}</span><span>{{x.created|dt}}</span></div></div>
+{% else %}<div class=card>No keys sold yet.</div>{% endfor %}</div>
+<script>
+function kcopy(t,b){var done=function(){if(b){var o=b.style.color;b.style.color='#34d399';setTimeout(function(){b.style.color=o},900)}};
+ if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done,function(){fb(t);done()})}else{fb(t);done()}}
+function fb(t){var a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity=0;document.body.appendChild(a);a.select();try{document.execCommand('copy')}catch(e){}document.body.removeChild(a)}
+document.addEventListener('click',function(e){var b=e.target.closest('[data-kcopy]');if(b)kcopy(b.dataset.kcopy,b)});
+var ks=document.getElementById('ksq');ks.oninput=function(){var v=ks.value.trim().toLowerCase(),n=0;document.querySelectorAll('#klist .kc').forEach(function(c){var m=!v||c.dataset.s.indexOf(v)>-1;c.style.display=m?'':'none';if(m)n++});document.getElementById('kshown').textContent=n};
+document.getElementById('kall').onclick=function(){var a=[];document.querySelectorAll('#klist .kc').forEach(function(c){if(c.style.display!=='none')a.push(c.dataset.k)});kcopy(a.join('\n'),this)};
+</script>{% endblock %}"""
+
+T["admin_reseller.html"] = T["admin_reseller.html"].replace(
+ """<div class=card><h3>Add / Deduct Credit</h3><form class=row method=post><input type=hidden name=action value=credit><input name=amount type=number step=any placeholder="Amount (negative to deduct)" required><button class=g>Update</button></form></div>""",
+ """<div class=card><h3>Add / Deduct Credit</h3><form class=row method=post><input type=hidden name=action value=credit><input name=amount type=number step=any min=0 inputmode=decimal placeholder="Amount ({{CURRENCY}})" required>
+<button class=g name=op value=add>{{ic('plus',16)}} Add</button><button class=r name=op value=deduct onclick="return confirm('Deduct this amount from {{r.username}}?')">&minus; Deduct</button></form>
+<p class=hint>Balance now: <b>{{r.balance|cur}}</b>. Deduct cannot take more than the balance.</p></div>""", 1)
+
+T["settings.html"] = r"""{% extends 'rbase.html' %}{% block c %}
+<div class=hd>{{ic('tool',24)}} SETTINGS</div>
+<div class=card><h3>{{ic('lock',20)}} Change password</h3>
+<div class=mu>If you think your password was leaked, change it now. After changing, every other device is logged out.</div>
+<form method=post autocomplete=off style="margin-top:10px"><input type=hidden name=action value=password>
+<p class=mu style="margin:10px 0 4px">Current password</p><input type=password name=old required autocomplete=current-password style="width:100%">
+<p class=mu style="margin:10px 0 4px">New password (min 6 characters)</p><input type=password name=new1 required minlength=6 autocomplete=new-password style="width:100%">
+<p class=mu style="margin:10px 0 4px">New password again</p><input type=password name=new2 required minlength=6 autocomplete=new-password style="width:100%">
+<button class=g style="margin-top:14px">{{ic('save',16)}} Change password</button></form></div>
+<div class=card><h3>{{ic('shield2',20)}} More</h3><div class=mu>Login code, Telegram alerts and your devices are in <a href="/security">Security</a>.</div></div>{% endblock %}"""
+
 TEMPLATES = T
+

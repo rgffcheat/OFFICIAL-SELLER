@@ -72,3 +72,12 @@ Alerts show money in INR (e.g. "59 INR"). Purchase alert: product, quantity, wal
 If an alert is NOT sent, the reason is written to Admin > Telegram > Delivery log
 (e.g. "skipped: no Telegram Chat ID linked", "skipped: reseller turned alerts OFF", or the Telegram error).
 Reseller > Security > "Send me a test alert" sends a sample purchase alert at once.
+
+---- v10 ----
+SOLD KEYS (admin): each sale is a card - reseller, product / plan, the KEY in a big copyable box with a Copy button,
+  price, source, time, Active/Expired. Search box + "Copy all shown keys". Shows the newest 1000.
+CREDIT: Admin > Resellers > Manage > Add / Deduct Credit has separate Add and Deduct buttons
+  (deduct cannot take more than the balance).
+SETTINGS (reseller): sidebar > Settings (above Logout) > Change password (needs the current password).
+  Changing it logs out every OTHER device, sends a "PASSWORD CHANGED" alert to the reseller's Telegram.
+  A password set by the admin also ends the reseller's old sessions.
