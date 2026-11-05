@@ -326,10 +326,20 @@ T["login_verify.html"] = LGHEAD + """<div class="logo-t">{{ic('shield2',30)}}</d
 <label for=cd>Enter the 6-digit code</label>
 <div class="fld">{{ic('lock',20)}}<input id=cd name=code inputmode=numeric pattern="[0-9]{6}" maxlength=6 minlength=6 placeholder="000000" required autofocus autocomplete=one-time-code style="letter-spacing:.4em;font-weight:800;font-size:20px"></div>
 <div class="sess">{{ic('hourglass',16)}} Code expires in 5 minutes</div>
+<div class="sess" id=ds style="color:#fbbf24">Sending the code to Telegram&hellip;</div>
 <button class="go">VERIFY {{ic('arrow',20)}}</button></form>
 <form method=post style="margin-top:12px"><input type=hidden name=action value=resend>
 <button class="o" style="width:100%;background:none;border:1px solid var(--bd);box-shadow:none">Resend code</button></form>
-<a href="/login/cancel" style="display:block;text-align:center;margin-top:14px;font-size:13px">&larr; Back to login</a>""" + LGFOOT + "</body></html>"
+<a href="/login/cancel" style="display:block;text-align:center;margin-top:14px;font-size:13px">&larr; Back to login</a>
+<script>
+var n=0;async function ps(){var d=document.getElementById('ds');try{var j=await(await fetch('/login/otp_status',{cache:'no-store'})).json();
+ if(j.state==='ok'){d.style.color='#34d399';d.textContent='Code delivered to your Telegram';return}
+ if(j.state==='fail'){d.style.color='#f87171';d.textContent='Could not send the code: '+j.err+' - press Resend, or tell the admin.';return}
+ if(j.state==='gone'){location.href='/login';return}}catch(e){}
+ if(++n>25){d.textContent='Telegram is slow... press Resend if the code does not arrive.';return}
+ setTimeout(ps,1200)}
+ps();
+</script>""" + LGFOOT + "</body></html>"
 
 T["blocked.html"] = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=theme-color content="#450a0a"><title>Access blocked</title>
 <style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:18px;font:15px/1.5 system-ui,Segoe UI,Arial,sans-serif;color:#fff;

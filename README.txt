@@ -59,3 +59,9 @@ DELIVERY LOG: Admin > Telegram shows the last sends (Delivered / Failed + exact 
   and warns if another copy of the bot (same token) is running somewhere else.
 PURCHASE ALERT: product, quantity, wallet balance left, validity, amount paid, TIME, key issued.
 LOW BALANCE ALERT: sent after every purchase while the balance is under the reseller's limit (default 50).
+
+---- v8 (freeze fix) ----
+Login no longer waits for Telegram: the code is sent in the background and the verification page shows
+"Sending... / Code delivered / Could not send: <reason>" live. If Telegram is slow the page still opens at once.
+Telegram connections are forced to IPv4 (broken IPv6 routes can make requests hang on Render) and have short timeouts.
+Failed Telegram sends are also printed to the Render > Logs tab as "[telegram] FAILED ...".

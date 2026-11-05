@@ -15,10 +15,15 @@ purchases never hits Telegram's rate limit (429 is retried automatically).
 import collections
 import html
 import queue
+import socket
 import threading
 import time
 
 import requests
+import urllib3.util.connection as _u3c
+
+# Some hosts (Render free) have a broken IPv6 route to Telegram -> requests hang. Use IPv4 only.
+_u3c.allowed_gai_family = lambda: socket.AF_INET
 
 API = "https://api.telegram.org/bot%s/%s"
 
@@ -61,6 +66,8 @@ class Bot:
 
     def _note(self, ok, chat_id, what, err=""):
         self.log.appendleft((int(time.time()), ok, str(chat_id), what, err))
+        if not ok:
+            print("[telegram] FAILED %s to %s: %s" % (what, chat_id, err), flush=True)   # visible in Render > Logs
         if ok:
             self.sent_ok += 1
         else:
@@ -72,7 +79,7 @@ class Bot:
         if not tok:
             raise RuntimeError("bot token not set")
         try:
-            r = requests.post(API % (tok, method), json=params, timeout=_timeout)
+            r = requests.post(API % (tok, method), json=params, timeout=(5, _timeout))
         except requests.RequestException as ex:
             e = RuntimeError("Network error: %s" % type(ex).__name__)
             e.network = True
@@ -115,7 +122,7 @@ class Bot:
         if not self.get_token():
             return False, "Bot token is not set"
         err = ""
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 self._send(chat_id, text, buttons)
                 self._note(True, chat_id, what)
@@ -123,10 +130,10 @@ class Bot:
             except Exception as e:
                 err = nice_error(e)
                 wait = getattr(e, "retry_after", None)
-                if wait and attempt < 2:
-                    time.sleep(min(int(wait) + 1, 8))
-                elif getattr(e, "network", False) and attempt < 2:
-                    time.sleep(1.5)
+                if wait and attempt < 1:
+                    time.sleep(min(int(wait) + 1, 5))
+                elif getattr(e, "network", False) and attempt < 1:
+                    time.sleep(1)
                 else:
                     break
         self._note(False, chat_id, what, err)

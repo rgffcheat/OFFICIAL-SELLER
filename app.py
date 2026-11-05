@@ -658,23 +658,39 @@ def otp_hash(rid, code):
     return hmac.new(app.secret_key.encode(), ("%d:%s" % (rid, code)).encode(), hashlib.sha256).hexdigest()
 
 
+_OTP_STATE = {}          # reseller id -> {"state": "sending"|"ok"|"fail", "err": str}
+
+
 def send_otp(r, force=False):
+    """Make a NEW random 6-digit code and send it to the reseller's Telegram IN THE BACKGROUND.
+    The login page never waits for Telegram (so it can never freeze); the verification page shows the result."""
     now = int(time.time())
     o = q("SELECT * FROM otps WHERE reseller_id=?", (r["id"],), one=True)
-    # Makes a NEW random 6-digit code and sends it right now (not queued), so a failure is known immediately.
     if o and not force and now - o["sent"] < 30 and o["exp"] > now:
-        return True, ""                                  # a fresh code was just sent
+        return                                           # a fresh code was just sent
     code = "%06d" % secrets.randbelow(1000000)
     q("INSERT OR REPLACE INTO otps(reseller_id,h,exp,tries,sent) VALUES(?,?,?,?,?)",
       (r["id"], otp_hash(r["id"], code), now + 300, 0, now), commit=True)
-    ok, err = bot.send_now(r["tg_chat"],
-             "<blockquote>\U0001F510 <b>Login verification</b></blockquote>\n\n"
-             "Use this one-time code to sign in to <b>%s</b>.\n\n<blockquote><code>%s</code></blockquote>\n\n"
-             "\u23F1 Expires in <b>5 minutes</b>.\n\U0001F6AB Keep this code private. Our team will never ask for it."
-             % (esc(BRAND), code), what="login code (%s)" % r["username"])
-    if not ok:
-        q("DELETE FROM otps WHERE reseller_id=?", (r["id"],), commit=True)    # nothing was delivered, so no valid code
-    return ok, err
+    st = {"state": "sending", "err": "", "ts": now}
+    _OTP_STATE[r["id"]] = st
+    text = ("<blockquote>\U0001F510 <b>Login verification</b></blockquote>\n\n"
+            "Use this one-time code to sign in to <b>%s</b>.\n\n<blockquote><code>%s</code></blockquote>\n\n"
+            "\u23F1 Expires in <b>5 minutes</b>.\n\U0001F6AB Keep this code private. Our team will never ask for it."
+            % (esc(BRAND), code))
+    chat, uname, rid = r["tg_chat"], r["username"], r["id"]
+
+    def work():
+        try:
+            ok, err = bot.send_now(chat, text, what="login code (%s)" % uname)
+        except Exception as e:
+            ok, err = False, str(e)[:150]
+        st["state"], st["err"] = ("ok", "") if ok else ("fail", err)
+        if not ok:
+            try:
+                q("DELETE FROM otps WHERE reseller_id=? AND sent=?", (rid, now), commit=True)   # nothing delivered = no valid code
+            except Exception:
+                pass
+    threading.Thread(target=work, daemon=True, name="otp-send").start()
 
 
 def check_otp(rid, code):
@@ -765,9 +781,7 @@ def next_step(r, dev, fresh=False):
     if otp_global_on() and r["otp_on"] and r["tg_chat"] and tg_token():
         session.clear()
         session["pre"] = dict(rid=r["id"], dev=dev, ts=int(time.time()))
-        ok, err = send_otp(r, force=fresh)       # fresh=True: every new login gets its own brand-new code
-        if not ok:        # never let anybody in without a code - tell them why it did not arrive
-            flash("The code could not be sent to your Telegram: %s. Press Resend, or tell the admin." % err[:160], "err")
+        send_otp(r, force=fresh)                 # fresh=True: every new login gets its own brand-new code
         return "/login/verify"
     return finish_login(r, dev, alert=True)
 
@@ -822,7 +836,7 @@ def do_login():
             session["admin"] = True
             return out(redirect("/admin"))
         for r in q("SELECT * FROM resellers WHERE lower(username)=lower(?)", (u,)):
-            if check_password_hash(r["pw"], raw) or check_password_hash(r["pw"], pw):
+            if check_password_hash(r["pw"], raw) or (pw != raw and check_password_hash(r["pw"], pw)):
                 if not r["active"]:
                     flash("Your account is disabled. Please contact admin.", "err")
                     break
@@ -867,6 +881,15 @@ def login_status():
     return jsonify(status="pending")
 
 
+@app.route("/login/otp_status")
+def login_otp_status():
+    r, p = pre_reseller()
+    if not r:
+        return jsonify(state="gone")
+    st = _OTP_STATE.get(r["id"]) or {"state": "ok", "err": ""}
+    return jsonify(state=st["state"], err=st["err"][:200])
+
+
 @app.route("/login/cancel")
 def login_cancel():
     session.clear()
@@ -887,11 +910,8 @@ def login_verify():
                 flash("Too many codes requested. Wait a few minutes.", "err")
             else:
                 rl_hit("otp-send:%d" % r["id"])
-                ok, err = send_otp(r, force=True)
-                if ok:
-                    flash("A new code was sent to your Telegram.", "ok")
-                else:
-                    flash("The code could not be sent: %s" % err[:160], "err")
+                send_otp(r, force=True)
+                flash("A new code is being sent to your Telegram.", "ok")
             return render_template("login_verify.html", title="Verification", tg_mask=mk)
         if rl_blocked("otp:%d" % r["id"], 10, 600):
             flash("Too many wrong codes. Please wait 10 minutes.", "err")
