@@ -18,8 +18,9 @@ ADMIN_PASS = "909090"
 TZ_OFFSET = int(os.environ.get("TZ_OFFSET_MIN", "330")) * 60  # default IST
 MAX_MUSIC = 20
 # ---- TELEGRAM BOT (edit here, nothing else to configure) ----------------------------------------
-TG_BOT_TOKEN = "9001525811:AAGxzhTA9GopN-rILXyAxdGqzBqmsHxlweM"   # token from @BotFather  (keep the GitHub repo PRIVATE)
-TG_ADMIN_ID = "6739795427"      # optional: your own Telegram Chat ID. Leave empty -> open the bot and send:  /admin 909090
+TG_BOT_TOKEN = ""   # NEVER write the bot token here (GitHub leak!). Set it in Admin > Telegram. Optional backup: Render env TG_BOT_TOKEN
+TG_ADMIN_ID = "6739795427"      # default admin Chat ID (not secret). Admin > Telegram can change it any time
+EMOJI_PACKS = [x for x in (os.environ.get("EMOJI_PACKS") or "RGCHEAT99,botd3,NewsEmoji").replace(" ", "").split(",") if x]   # premium emoji packs (first = highest priority)
 BRAND = "RG CHEAT"      # name shown on login + panel header
 CURRENCY = "₹"         # symbol shown before money amounts (all prices are INR)
 DEFAULT_API_BASE = "https://adminshops.com/api/v1"   # main provider API (editable in Admin > Main API)
@@ -95,9 +96,13 @@ def init_db():
     for col, ddl in (("mode", "TEXT DEFAULT 'random'"), ("ext_url", "TEXT DEFAULT ''"),
                      ("ext_method", "TEXT DEFAULT 'POST'"), ("ext_headers", "TEXT DEFAULT ''"),
                      ("ext_body", "TEXT DEFAULT ''"), ("ext_path", "TEXT DEFAULT ''"),
-                     ("prov_pid", "INTEGER")):
+                     ("prov_pid", "INTEGER"), ("hours", "INTEGER NOT NULL DEFAULT 0")):
         if col not in cols:
             c.execute("ALTER TABLE plans ADD COLUMN %s %s" % (col, ddl))
+    for r_ in c.execute("SELECT id,name FROM plans WHERE hours=0").fetchall():
+        m_ = re.search(r"(\d+)\s*(hours?|hrs?|h)\b", (r_[1] or "").lower())
+        if m_:
+            c.execute("UPDATE plans SET hours=? WHERE id=?", (int(m_.group(1)), r_[0]))
     rcols = [r[1] for r in c.execute("PRAGMA table_info(resellers)")]
     for col, ddl in (("theme", "TEXT DEFAULT ''"), ("tg_chat", "TEXT DEFAULT ''"),
                      ("otp_on", "INTEGER NOT NULL DEFAULT 1"), ("notify", "INTEGER NOT NULL DEFAULT 1"),
@@ -133,9 +138,34 @@ app.jinja_env.filters["cur"] = _cur
 app.jinja_env.globals.update(BRAND=BRAND, year=time.gmtime().tm_year, CURRENCY=CURRENCY)
 
 
-def plan_label(days):
+def plan_label(days, hours=0):
+    """'1 Hour' / '3 Hours' when hours>0, else '1 Day' / '7 Days'."""
+    hours = int(hours or 0)
+    if hours > 0:
+        return "%d Hour%s" % (hours, "" if hours == 1 else "s")
     days = max(int(days), 1)
     return "%d Day%s" % (days, "" if days == 1 else "s")
+
+
+def plan_secs(pl):
+    """Real validity of a plan in seconds (hour plans use hours, others use days)."""
+    try:
+        h = int(pl["hours"] or 0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        h = 0
+    return h * 3600 if h > 0 else max(int(pl["days"]), 1) * 86400
+
+
+def validity_text(pl):
+    """Text for bot alerts: '1 hours (1 HOURS)' or '1 days (1 DAYS)' - matches the real purchase."""
+    try:
+        h = int(pl["hours"] or 0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        h = 0
+    if h > 0:
+        return "%d hours (%d HOURS)" % (h, h)
+    d = max(int(pl["days"]), 1)
+    return "%d days (%d DAYS)" % (d, d)
 
 
 def price_for(rid, plan):
@@ -238,6 +268,12 @@ def inr_of(p, cat):
     return round(price, 2)
 
 
+def parse_hours(text):
+    """Number of hours if the duration is an hour plan ('1 Hour', '3hr', '6 h'), else 0."""
+    m = re.search(r"(\d+)\s*(hours?|hrs?|h)\b", (text or "").lower())
+    return int(m.group(1)) if m else 0
+
+
 def parse_days(text):
     s = (text or "").lower()
     if "life" in s:
@@ -261,10 +297,10 @@ def catalog(rid):
     out = []
     for p in q("SELECT * FROM products ORDER BY id"):
         plans = []
-        for pl in q("SELECT * FROM plans WHERE product_id=? ORDER BY days, id", (p["id"],)):
+        for pl in q("SELECT * FROM plans WHERE product_id=? ORDER BY (CASE WHEN hours>0 THEN hours*3600 ELSE days*86400 END), id", (p["id"],)):
             price, custom = price_for(rid, pl)
             sc = q("SELECT COUNT(*) FROM stock WHERE plan_id=? AND used=0", (pl["id"],), one=True)[0]
-            plans.append(dict(id=pl["id"], name=pl["name"], days=pl["days"], price=price, custom=custom,
+            plans.append(dict(id=pl["id"], name=pl["name"], days=pl["days"], hours=pl["hours"] or 0, price=price, custom=custom,
                               mode=pl["mode"] or "random", stock=sc))
         out.append(dict(id=p["id"], name=p["name"], plans=plans))
     return out
@@ -279,7 +315,7 @@ def _dig(obj, path):
 def fetch_external(pl):
     """Call the provider API configured on the plan and return the key text."""
     import requests
-    rep = {"{days}": str(pl["days"]), "{plan}": pl["name"], "{product}": pl["pname"]}
+    rep = {"{days}": str(pl["days"]), "{hours}": str(pl["hours"] or 0), "{plan}": pl["name"], "{product}": pl["pname"]}
 
     def sub(t):
         for k, v in rep.items():
@@ -335,7 +371,7 @@ def buy(rid, plan_id, via="panel"):
             pre = re.sub(r"[^A-Z0-9]", "", pl["pname"].upper())[:6] or "KEY"
             raw = secrets.token_hex(8).upper()
             key = pre + "-" + "-".join(raw[i:i + 4] for i in range(0, 16, 4))
-        exp = now + int(pl["days"]) * 86400
+        exp = now + plan_secs(pl)
         c.execute("UPDATE resellers SET balance=balance-? WHERE id=?", (price, rid))
         if key:
             c.execute("INSERT INTO license_keys(reseller_id,product_name,plan_name,key,price,created,expires,via) "
@@ -554,11 +590,37 @@ def num(v, default=0.0):
 
 # ---------------------------------------------------------------- telegram + security helpers
 def tg_token():
-    return (os.environ.get("TG_BOT_TOKEN") or TG_BOT_TOKEN or get_setting("tg_token")).strip()
+    """Panel (Admin > Telegram) wins. Render env var TG_BOT_TOKEN is only the fallback (e.g. after a free-disk wipe)."""
+    return (get_setting("tg_token") or os.environ.get("TG_BOT_TOKEN") or TG_BOT_TOKEN or "").strip()
+
+
+def tg_token_source():
+    if get_setting("tg_token"):
+        return "panel"
+    return "env" if (os.environ.get("TG_BOT_TOKEN") or TG_BOT_TOKEN) else ""
 
 
 def tg_admin():
-    return str(os.environ.get("ADMIN_TG_ID") or TG_ADMIN_ID or get_setting("tg_admin")).strip()
+    return str(get_setting("tg_admin") or os.environ.get("ADMIN_TG_ID") or TG_ADMIN_ID or "").strip()
+
+
+def emoji_overrides():
+    """{plain emoji: custom_emoji_id} picked in Admin > Telegram > Premium emoji picker."""
+    try:
+        d = json.loads(get_setting("emoji_map", "{}") or "{}")
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+# every emoji the bot uses in its messages (the picker lets you choose a premium emoji for each one)
+EMOJI_ROLES = [("\u2705", "Done / Product"), ("\u274C", "Reject / Error"), ("\U0001F6D2", "Quantity"),
+               ("\U0001F4B0", "Balance"), ("\U0001F4B8", "Paid / Amount"),
+               ("\u23F1", "Validity"), ("\U0001F552", "Time"), ("\U0001F6AB", "Paid by / Warning"),
+               ("\U0001F511", "Key"), ("\U0001F464", "Reseller"), ("\U0001F4F1", "Device"),
+               ("\U0001F310", "IP"), ("\U0001F514", "Notification"), ("\U0001F513", "Login"),
+               ("\U0001F510", "Login code"), ("\U0001F6A8", "Low balance"), ("\U0001F4B3", "Method"),
+               ("\U0001F44B", "Welcome")]
 
 
 _CLAIMS = []
@@ -615,7 +677,8 @@ def mask_id(tc):
     return ("•" * max(len(tc) - 4, 0) + tc[-4:]) if tc else ""
 
 
-bot = tgbot.Bot(tg_token, tg_admin, device_decision, BRAND, claim_admin, tg_seen)
+bot = tgbot.Bot(tg_token, tg_admin, device_decision, BRAND, claim_admin, tg_seen,
+                packs=EMOJI_PACKS, prem_on=lambda: get_setting("prem_on", "1") == "1", get_overrides=emoji_overrides)
 
 
 def ua_label(ua):
@@ -631,16 +694,16 @@ def inr(v):
     return "%s INR" % money_txt(v)
 
 
-def purchase_text(pname, days, price, bal, key, via, buyer=None):
+def purchase_text(pname, validity, price, bal, key, via, buyer=None):
     line = "\u2500" * 16
     extra = ("\n\U0001F464 Bought by: <b>%s</b>\n\U0001F4B0 Reseller Current Balance: <b>%s</b>\n"
              % (esc(buyer), inr(bal))) if buyer else "\n"
     return ("<blockquote>\u2705 <b>NEW PURCHASE ALERT</b></blockquote>\n%s\n"
             "\u2705 Product: <b>%s</b>\n\U0001F6D2 Quantity: 1\n\U0001F4B0 Wallet Balance: <b>%s</b>\n"
-            "\u23F1 Validity: %d days (%d DAYS)\n\U0001F4B8 Paid: <b>%s</b>\n\U0001F6AB Paid by: Wallet (%s)\n"
+            "\u23F1 Validity: %s\n\U0001F4B8 Paid: <b>%s</b>\n\U0001F6AB Paid by: Wallet (%s)\n"
             "\U0001F552 Time: %s\n"
             "\U0001F511 Key Issued: <code>%s</code>%s%s"
-            % (line, esc(pname), inr(bal), int(days), int(days), inr(price),
+            % (line, esc(pname), inr(bal), esc(validity), inr(price),
                "API" if via == "api" else "Panel", fmt(time.time()), esc(key), extra, line))
 
 
@@ -659,7 +722,7 @@ def notify_purchase(r, pl, price, bal, key, via):
     try:                                                # admin always gets a copy (+ who bought, current balance)
         adm = tg_admin()
         if adm:
-            bot.send(adm, purchase_text(pl["pname"], pl["days"], price, bal, key, via, buyer=who),
+            bot.send(adm, purchase_text(pl["pname"], validity_text(pl), price, bal, key, via, buyer=who),
                      what="admin purchase alert (%s)" % who)
     except Exception as e:
         bot._note(False, "-", "admin purchase alert (%s)" % who, "error: %s" % str(e)[:150])
@@ -670,7 +733,7 @@ def notify_purchase(r, pl, price, bal, key, via):
         if not r["notify"]:
             bot._note(False, r["tg_chat"], "purchase alert (%s)" % who, "skipped: reseller turned alerts OFF (Security page)")
             return
-        items = [(purchase_text(pl["pname"], pl["days"], price, bal, key, via), None)]
+        items = [(purchase_text(pl["pname"], validity_text(pl), price, bal, key, via), None)]
         lim = r["low_bal"] or 0
         if lim > 0 and bal < lim:                       # wallet is under the limit -> warn after every purchase
             items.append((low_text(bal, lim), None))
@@ -681,12 +744,27 @@ def notify_purchase(r, pl, price, bal, key, via):
         bot._note(False, "-", "purchase alert (%s)" % who, "error: %s" % str(e)[:150])
 
 
-def notify_topup(r, amount):
-    if not r or not r["tg_chat"] or not r["notify"]:
+def notify_topup(r, amount, how="UPI (auto)"):
+    """BALANCE ADDED: admin always gets a copy (who, how much, current balance); the reseller gets one too."""
+    if not r:
+        return
+    who = r["username"]
+    line = "\u2500" * 16
+    adm = tg_admin()
+    try:
+        if adm:
+            bot.send(adm, "<blockquote>\U0001F4B0 <b>BALANCE ADDED</b></blockquote>\n%s\n"
+                          "\U0001F464 Reseller: <b>%s</b>\n\u2705 Added: <b>%s</b>\n"
+                          "\U0001F4B0 Current Balance: <b>%s</b>\n\U0001F4B3 Method: %s\n\U0001F552 Time: %s\n%s"
+                     % (line, esc(who), inr(amount), inr(r["balance"]), esc(how), fmt(time.time()), line),
+                     what="admin balance alert (%s)" % who)
+    except Exception as e:
+        bot._note(False, "-", "admin balance alert (%s)" % who, "error: %s" % str(e)[:150])
+    if not r["tg_chat"] or not r["notify"] or str(r["tg_chat"]) == str(adm):
         return
     bot.send(r["tg_chat"], "<blockquote>\U0001F4B0 <b>BALANCE ADDED</b></blockquote>\n"
                            "\u2705 Added: <b>%s</b>\n\U0001F4B0 Wallet Balance: <b>%s</b>"
-             % (inr(amount), inr(r["balance"])), what="balance added (%s)" % r["username"])
+             % (inr(amount), inr(r["balance"])), what="balance added (%s)" % who)
 
 
 # ---- login protection
@@ -1366,7 +1444,7 @@ def api_products():
         cat = [p for p in cat if p["id"] in want]
     return jsonify(success=True, currency="INR", count=len(cat), missing_ids=missing, products=[
         dict(product_id=p["id"], name=p["name"],
-             plans=[dict(plan_id=x["id"], name=x["name"], days=x["days"], price=x["price"],
+             plans=[dict(plan_id=x["id"], name=x["name"], days=x["days"], hours=x["hours"], price=x["price"],
                          currency="INR", available=(x["stock"] > 0 if x["mode"] == "stock" else True))
                     for x in p["plans"]])
         for p in cat])
@@ -1431,30 +1509,35 @@ def admin_products():
             q("INSERT INTO products(name) VALUES(?)", (request.form["name"].strip(),), commit=True)
         elif a == "plan":
             try:
-                days = max(int(num(request.form.get("days"), 1)), 1)
-                q("INSERT INTO plans(product_id,name,days,price,mode) VALUES(?,?,?,?,?)",
-                  (int(request.form["product_id"]), plan_label(days), days,
+                n = max(int(num(request.form.get("days"), 1)), 1)
+                hours = n if request.form.get("unit") == "hours" else 0
+                days = max(-(-n // 24), 1) if hours else n
+                q("INSERT INTO plans(product_id,name,days,hours,price,mode) VALUES(?,?,?,?,?,?)",
+                  (int(request.form["product_id"]), plan_label(days, hours), days, hours,
                    num(request.form.get("price")), request.form.get("mode", "stock")), commit=True)
             except Exception as e:
                 flash("Error: %s" % e, "err")
         elif a == "edit_plan":
-            days = max(int(num(request.form.get("days"), 1)), 1)
+            n = max(int(num(request.form.get("days"), 1)), 1)
+            hours = n if request.form.get("unit") == "hours" else 0
+            days = max(-(-n // 24), 1) if hours else n
             plid = int(request.form["plan_id"])
-            old = q("SELECT days,name,prov_pid FROM plans WHERE id=?", (plid,), one=True)
+            old = q("SELECT days,hours,name,prov_pid FROM plans WHERE id=?", (plid,), one=True)
             mode = request.form.get("mode", "stock")
             if old and mode == "provider" and not old["prov_pid"]:
                 flash("This plan is not linked to the main API", "err")
             elif old:
-                name = old["name"] if old["days"] == days else plan_label(days)
-                q("UPDATE plans SET name=?, days=?, price=?, mode=? WHERE id=?",
-                  (name, days, num(request.form.get("price")), mode, plid), commit=True)
+                same = old["days"] == days and (old["hours"] or 0) == hours
+                name = old["name"] if same else plan_label(days, hours)
+                q("UPDATE plans SET name=?, days=?, hours=?, price=?, mode=? WHERE id=?",
+                  (name, days, hours, num(request.form.get("price")), mode, plid), commit=True)
         elif a == "del_plan":
             q("DELETE FROM plans WHERE id=?", (int(request.form["plan_id"]),), commit=True)
         elif a == "del_product":
             q("DELETE FROM products WHERE id=?", (int(request.form["product_id"]),), commit=True)
         return redirect("/admin/products")
     prods = [dict(p=p, plans=[dict(pl=pl, stock=q("SELECT COUNT(*) FROM stock WHERE plan_id=? AND used=0", (pl["id"],), one=True)[0])
-                              for pl in q("SELECT * FROM plans WHERE product_id=? ORDER BY days,id", (p["id"],))])
+                              for pl in q("SELECT * FROM plans WHERE product_id=? ORDER BY (CASE WHEN hours>0 THEN hours*3600 ELSE days*86400 END), id", (p["id"],))])
              for p in q("SELECT * FROM products ORDER BY id")]
     return render_template("admin_products.html", prods=prods, page="products")
 
@@ -1597,6 +1680,10 @@ def admin_reseller(rid):
                 q("UPDATE resellers SET balance=MAX(balance+?,0) WHERE id=?", (amt, rid), commit=True)
                 after = q("SELECT balance FROM resellers WHERE id=?", (rid,), one=True)["balance"]
                 if amt > 0:
+                    try:
+                        notify_topup(q("SELECT * FROM resellers WHERE id=?", (rid,), one=True), amt, "Admin panel")
+                    except Exception:
+                        pass
                     flash("Added %s. New balance %s" % (money_txt(amt), money_txt(after)), "ok")
                 elif before + amt < 0:
                     flash("Balance cannot go below 0 - deducted only %s. New balance %s" % (money_txt(before - after), money_txt(after)), "ok")
@@ -1687,18 +1774,43 @@ def admin_telegram():
         if a == "save":
             tok = f.get("token", "").strip()
             adm_id = f.get("admin_id", "").strip()
+            if adm_id and not re.fullmatch(r"-?\d{5,15}", adm_id):
+                flash("Admin Chat ID must be numbers only", "err")
+                return redirect("/admin/telegram")
             if tok:
                 if not re.fullmatch(r"\d{6,12}:[\w-]{30,60}", tok):
                     flash("That does not look like a bot token (from @BotFather)", "err")
                     return redirect("/admin/telegram")
-                set_setting("tg_token", tok)
-            if adm_id and not re.fullmatch(r"-?\d{5,15}", adm_id):
-                flash("Admin Chat ID must be numbers only", "err")
-                return redirect("/admin/telegram")
+                ok, info = bot.check_token(tok)            # ask Telegram BEFORE saving
+                if not ok and ("unauthorized" in info.lower() or "not found" in info.lower()):
+                    flash("Telegram rejected this token - not saved. (%s)" % info, "err")
+                    return redirect("/admin/telegram")
+                if tok != tg_token():
+                    set_setting("tg_token", tok)
+                    bot.token_changed()                    # the bot switches to the new token right now
+                if ok:
+                    flash("New token saved - @%s is running now. No redeploy needed." % info.get("username", "bot"), "ok")
+                else:
+                    flash("Token saved, but Telegram could not be reached to check it (%s)." % info, "err")
             set_setting("tg_admin", adm_id)
             set_setting("dev_check", "1" if f.get("dev_check") else "0")
             set_setting("otp_global", "1" if f.get("otp_global") else "0")
-            flash("Telegram settings saved", "ok")
+            set_setting("prem_on", "1" if f.get("prem_on") else "0")
+            if not tok:
+                flash("Telegram settings saved", "ok")
+        elif a == "clear_token":
+            set_setting("tg_token", "")
+            bot.token_changed()
+            flash("Bot token removed. The bot is OFF until you paste a new token." if not tg_token()
+                  else "Panel token removed. Now using the Render env TG_BOT_TOKEN.", "ok")
+        elif a == "reset_emoji":
+            set_setting("emoji_map", "{}")
+            bot.refresh_map()
+            flash("Emoji choices reset to automatic", "ok")
+        elif a == "test_alert":
+            ok, err = send_bounded(tg_admin(), purchase_text("SAMPLE PRODUCT", 1, 20, 824.44, "5456242 : 49892697",
+                                                             "panel", buyer="RPSHIVA"), what="sample alert")
+            flash("Sample alert sent to your Telegram" if ok else "Could not send: %s" % err, "ok" if ok else "err")
         elif a == "test":
             ok, err = send_bounded(tg_admin(), "\u2705 <b>%s</b>\nTest message - the bot is connected." % esc(BRAND),
                                    what="admin test")
@@ -1718,8 +1830,87 @@ def admin_telegram():
                            admin_id=tg_admin(), dev_check=get_setting("dev_check", "1") == "1",
                            otp_global=otp_global_on(), rs=rs, log=list(bot.log), poll_err=bot.poll_err, me_err=bot.me_err,
                            sent_ok=bot.sent_ok, sent_fail=bot.sent_fail, seen=seen_unlinked(),
-                           env_tok=bool(os.environ.get("TG_BOT_TOKEN") or TG_BOT_TOKEN), env_adm=bool(os.environ.get("ADMIN_TG_ID") or TG_ADMIN_ID),
-                           active=dev_check_on(), page="telegram")
+                           tok_src=tg_token_source(), roles=emoji_roles(), extras=emoji_extras(),
+                           cat=bot.catalog(), n_over=len(emoji_overrides()),
+                           active=dev_check_on(), prem_on=get_setting("prem_on", "1") == "1", prem=bot.status(), page="telegram")
+
+
+def emoji_roles():
+    ov, out = emoji_overrides(), []
+    for em, label in EMOJI_ROLES:
+        cid = ov.get(em) or bot.emap.get(em.replace("\ufe0f", "")) or ""
+        out.append(dict(em=em, label=label, cid=cid, manual=bool(ov.get(em)), mine=ov.get(em) or ""))
+    return out
+
+
+def emoji_extras():
+    """Emoji added by the admin that are not in the fixed list (Admin > Telegram > Emoji ID manager > Add any emoji)."""
+    known = {e for e, _ in EMOJI_ROLES}
+    return [dict(em=k, cid=v) for k, v in emoji_overrides().items() if k not in known]
+
+
+def valid_emoji_key(k):
+    """A plain emoji (1-12 characters, no letters/digits/spaces) that can be replaced by a premium emoji."""
+    k = (k or "").strip()
+    return 0 < len(k) <= 12 and not re.search(r"[A-Za-z0-9\s<>&]", k) and any(ord(c) > 0x2000 for c in k)
+
+
+@app.route("/admin/emoji/thumb/<cid>")
+@admin_required
+def admin_emoji_thumb(cid):
+    if not re.fullmatch(r"\d{5,25}", cid):
+        abort(404)
+    try:
+        t = bot.thumb(cid)
+    except Exception:
+        t = None
+    if not t:
+        abort(404)
+    resp = make_response(t[0])
+    resp.headers["Content-Type"] = t[1]
+    resp.headers["Cache-Control"] = "private, max-age=86400"
+    return resp
+
+
+@app.route("/admin/emoji/set", methods=["POST"])
+@admin_required
+def admin_emoji_set():
+    """Set / clear the premium emoji ID of ONE plain emoji (any emoji, not only the fixed list)."""
+    d = request.get_json(silent=True) or {}
+    role, cid = str(d.get("role") or "").strip(), re.sub(r"\D", "", str(d.get("cid") or ""))
+    if not valid_emoji_key(role) or (cid and not re.fullmatch(r"\d{5,25}", cid)):
+        return jsonify(ok=False, msg="Wrong emoji or ID (the ID is only digits, e.g. 5368324170671202286)"), 400
+    found = None
+    if cid:
+        try:                                    # ask Telegram if this ID really exists (so a typo is caught at once)
+            found = bool(bot.lookup(cid))
+        except Exception:
+            found = None                        # Telegram not reachable now: still save it
+    m = emoji_overrides()
+    if cid:
+        m[role] = cid
+    else:
+        m.pop(role, None)
+    set_setting("emoji_map", json.dumps(m))
+    bot.refresh_map()
+    return jsonify(ok=True, cid=cid or bot.emap.get(role.replace("\ufe0f", ""), ""), found=found)
+
+
+@app.route("/admin/emoji/bulk", methods=["POST"])
+@admin_required
+def admin_emoji_bulk():
+    """Paste many lines like  '✅ 5368324170671202286'  (exactly what the bot's /emojis reply gives)."""
+    txt = str((request.get_json(silent=True) or {}).get("text") or "")
+    m, n = emoji_overrides(), 0
+    for line in txt.splitlines():
+        mm = re.match(r"^\s*(\S{1,12}?)\s*[:=>\-\u2192]*\s*(\d{5,25})\s*$", line)
+        if mm and valid_emoji_key(mm.group(1)):
+            m[mm.group(1)] = mm.group(2)
+            n += 1
+    if n:
+        set_setting("emoji_map", json.dumps(m))
+        bot.refresh_map()
+    return jsonify(ok=bool(n), n=n)
 
 
 @app.route("/admin/devices", methods=["GET", "POST"])
@@ -1868,8 +2059,8 @@ def admin_main_api_products():
                 prid = q("INSERT INTO products(name) VALUES(?)", (pname,), commit=True)
                 new_pr += 1
             dur = str(p.get("duration") or "1 Day").strip()
-            q("INSERT INTO plans(product_id,name,days,price,mode,prov_pid) VALUES(?,?,?,?,?,?)",
-              (prid, dur, parse_days(dur), price, "provider", pid), commit=True)
+            q("INSERT INTO plans(product_id,name,days,hours,price,mode,prov_pid) VALUES(?,?,?,?,?,?,?)",
+              (prid, dur, parse_days(dur), parse_hours(dur), price, "provider", pid), commit=True)
             new_pl += 1
         flash("Imported %d plan(s), %d new product(s). Updated prices: %d. Skipped (already there): %d."
               % (new_pl, new_pr, upd, skip), "ok")

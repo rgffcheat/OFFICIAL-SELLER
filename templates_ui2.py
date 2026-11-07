@@ -400,7 +400,13 @@ T["admin_telegram.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic('
 <input name=admin_id value="{{admin_id}}" placeholder="e.g. 123456789" style="width:100%" inputmode=numeric>
 <label class=mu style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type=checkbox name=dev_check value=1 {{'checked' if dev_check}} style="width:auto"> Require admin approval for every new reseller device</label>
 <label class=mu style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type=checkbox name=otp_global value=1 {{'checked' if otp_global}} style="width:auto"> <b>Login code (6-digit, Telegram) for resellers</b> &mdash; master switch. Untick = nobody needs a code (direct login) until the bot works.</label>
+<label class=mu style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type=checkbox name=prem_on value=1 {{'checked' if prem_on}} style="width:auto"> <b>Premium emoji</b> in bot messages (falls back to normal emoji automatically if Telegram refuses)</label>
 <button class=g style="margin-top:12px">{{ic('save')}} Save</button></form></div>
+<div class=card><h3>Premium emoji</h3>
+<div class=mu>Mode: <b>{{prem.mode}}</b> &middot; {{prem.total}} emoji loaded <span class=mu>(both = text + buttons, text, btn = buttons only, plain = normal emoji)</span></div>
+{% for n,i in prem.packs %}<div class=mu style="margin-top:4px">{% if i.ok %}<span class="pill a">OK</span>{% else %}<span class="pill e">FAIL</span>{% endif %} <b>{{n}}</b> &mdash; {% if i.ok %}{{i.count}} emoji{% else %}{{i.err}}{% endif %}</div>{% endfor %}
+{% if prem.err %}<p class=hint>Last Telegram refusal: {{prem.err}}</p>{% endif %}
+<p class=hint>In the bot (as admin) send <code>/emojis</code> for this status, or send premium emojis / a <code>t.me/addemoji/...</code> link to get their IDs.</p></div>
 <div class=card><h3>Test</h3><form method=post><input type=hidden name=action value=test><button>{{ic('send')}} Send test message to me</button></form>
 <p class=hint>Open your bot in Telegram and press Start first, otherwise Telegram will not let the bot message you.</p></div>
 
@@ -774,4 +780,89 @@ mf.addEventListener('submit',function(e){var f=mf.querySelector('input[type=file
  x.ontimeout=x.onerror;x.timeout=600000;x.open('POST','/admin/music');x.send(new FormData(mf))});
 </script>{% endblock %}""", 1)
 
+# ---- v10.7: change the bot token from the panel + premium emoji picker
+T["admin_telegram.html"] = T["admin_telegram.html"].replace(
+ """<p class=mu>Bot token (from @BotFather){% if has_token %} &mdash; saved (ends with <code>{{tail}}</code>). Leave empty to keep it.{% endif %}{% if env_tok %} <b>(set inside app.py / env, it wins)</b>{% endif %}</p>""",
+ """<p class=mu>Bot token (from @BotFather){% if has_token %} &mdash; saved (ends with <code>{{tail}}</code>){% if tok_src=='env' %}, from the Render env variable{% endif %}. Leave empty to keep it.{% endif %}<br>Paste a NEW token here and press Save: it is checked with Telegram and the bot switches to it <b>at once</b> (no redeploy, no code change).</p>""", 1)
+T["admin_telegram.html"] = T["admin_telegram.html"].replace(
+ """{% if env_adm %} <b>(set inside app.py / env, it wins)</b>{% endif %}""", "", 1)
+T["admin_telegram.html"] = T["admin_telegram.html"].replace(
+ """<div class=card><h3>Test</h3>""",
+ """{% if has_token and tok_src=='panel' %}<div class=card><h3>Token leaked?</h3><p class=hint>1) In @BotFather send <code>/revoke</code> and get the new token. 2) Paste it above and Save. The old token stops working immediately, the website stays online.</p>
+<form method=post onsubmit="return confirm('Remove the bot token? The bot goes OFF until you paste a new one.')"><input type=hidden name=action value=clear_token><button class=r>Remove token</button></form></div>{% endif %}
+<div class=card><h3>Test</h3>""", 1)
+T["admin_telegram.html"] = T["admin_telegram.html"].replace(
+ """<p class=hint>Open your bot in Telegram and press Start first""",
+ """<form method=post style="margin-top:8px"><input type=hidden name=action value=test_alert><button>{{ic('send')}} Send sample purchase alert (to see the emoji)</button></form>
+<p class=hint>Open your bot in Telegram and press Start first""", 1)
+T["admin_telegram.html"] = T["admin_telegram.html"].replace(
+ """<div class=card><h3>Test</h3>""",
+ """<div class=card id=emgr><h3>Emoji ID manager</h3>
+<p class=hint>Every emoji the bot uses is listed here. <b>Paste a premium emoji ID</b> in the box and press <b>Save</b> &mdash; it is used in every message at once. Empty the box and Save to go back to automatic.
+{% if n_over %}({{n_over}} set by you){% endif %}</p>
+<p class=hint><b>How to get an ID:</b> open your bot in Telegram (as admin) and send it any premium emoji (or a <code>t.me/addemoji/...</code> pack link). It replies with the ID of each emoji. You can copy that ID here.</p>
+<style>.er{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;margin:6px 0;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:12px}.er .em{font-size:22px;min-width:28px;text-align:center}.er .lb{min-width:92px;font-size:13px;opacity:.75}.er img{width:30px;height:30px;object-fit:contain}.er input{flex:1;min-width:150px;margin:0}.er button{padding:7px 12px}.er .ms{width:100%;font-size:12px;min-height:14px}</style>
+<div id=erows>{% for r in roles %}<div class=er data-r="{{r.em}}"><span class=em>{{r.em}}</span><span class=lb>{{r.label}}</span>&rarr;{% if r.cid %}<img class=ep src="/admin/emoji/thumb/{{r.cid}}" alt="">{% else %}<img class=ep alt="" style="display:none">{% endif %}<input class=eid inputmode=numeric placeholder="Emoji ID" value="{{r.mine}}"><button type=button class=sv>Save</button><span class=ms></span></div>{% endfor %}</div>
+<h3 style="margin-top:18px">Add any emoji</h3>
+<p class=hint>Type or paste any normal emoji (the one used in the bot message) and the premium emoji ID it should become.</p>
+<div class=er id=eadd><input id=enew placeholder="Normal emoji, e.g. &#128293;" style="max-width:150px;flex:0 0 150px;font-size:20px"><span>&rarr;</span><input id=enewid class=eid inputmode=numeric placeholder="Emoji ID"><button type=button id=eaddb>Add</button><span class=ms id=eaddm></span></div>
+<div id=eextra>{% for r in extras %}<div class=er data-r="{{r.em}}"><span class=em>{{r.em}}</span><span class=lb>Added by you</span>&rarr;<img class=ep src="/admin/emoji/thumb/{{r.cid}}" alt=""><input class=eid inputmode=numeric value="{{r.cid}}"><button type=button class=sv>Save</button><button type=button class="sv rm r">Remove</button><span class=ms></span></div>{% endfor %}</div>
+<details style="margin-top:14px"><summary style="cursor:pointer"><b>Paste many at once</b></summary>
+<p class=hint>One per line: the emoji, a space, the ID. (You can paste the bot's reply directly.)</p>
+<textarea id=ebulk rows=5 placeholder="&#9989; 5368324170671202286&#10;&#128273; 5314504236132747481" style="width:100%"></textarea>
+<button type=button id=ebulkb style="margin-top:6px">Apply all</button> <span class=ms id=ebulkm></span></details>
+<details style="margin-top:14px"><summary style="cursor:pointer"><b>Pick from my emoji packs</b> ({{cat|length}} emoji)</summary>
+<p class=hint>Tap an emoji below to copy its ID into the box you last touched.</p>
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(52px,1fr));gap:6px;margin-top:10px">{% for pk,ix,cid,em in cat %}<button type=button class=ecell data-c="{{cid}}" title="{{pk}} #{{ix}}" style="padding:4px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:10px"><img loading=lazy src="/admin/emoji/thumb/{{cid}}" width=40 height=40 alt="{{em}}"></button>{% else %}<div class=mu>Packs not loaded yet (bot token must work). Reload in a few seconds.</div>{% endfor %}</div></details>
+<form method=post style="margin-top:12px" onsubmit="return confirm('Remove ALL your emoji IDs and go back to automatic?')"><input type=hidden name=action value=reset_emoji><button class=r>Reset to automatic</button></form>
+<script>(function(){var last=null;
+function J(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().then(function(j){j.status=r.status;return j})})}
+function save(row,idv,done){var ms=row.querySelector('.ms');ms.textContent='Saving...';
+J('/admin/emoji/set',{role:row.dataset.r,cid:idv}).then(function(j){if(!j.ok){ms.style.color='#ff6b6b';ms.textContent=j.msg||'Could not save';return}
+var im=row.querySelector('.ep');if(j.cid){im.src='/admin/emoji/thumb/'+j.cid+'?t='+Date.now();im.style.display=''}else{im.style.display='none'}
+ms.style.color=j.found===false?'#ffb020':'#3ddc97';ms.textContent=j.found===false?'Saved, but Telegram does not know this ID - check it':(idv?'Saved. Next messages use it.':'Back to automatic.');if(done)done(j)}).catch(function(){ms.style.color='#ff6b6b';ms.textContent='Could not save, try again'})}
+function wire(row){var inp=row.querySelector('.eid');inp.addEventListener('focus',function(){last=inp});
+row.querySelector('.sv').addEventListener('click',function(){save(row,inp.value.trim())});
+var rm=row.querySelector('.rm');if(rm)rm.addEventListener('click',function(){save(row,'',function(){row.remove()})})}
+document.querySelectorAll('#erows .er,#eextra .er').forEach(wire);
+document.getElementById('enewid').addEventListener('focus',function(){last=this});
+document.getElementById('eaddb').addEventListener('click',function(){var e=document.getElementById('enew').value.trim(),i=document.getElementById('enewid').value.trim(),m=document.getElementById('eaddm');
+if(!e||!i){m.textContent='Fill both: the emoji and its ID';return}
+var row=document.createElement('div');row.className='er';row.dataset.r=e;row.innerHTML='<span class=em></span><span class=lb>Added by you</span>&rarr;<img class=ep alt="" style="display:none"><input class=eid inputmode=numeric><button type=button class=sv>Save</button><button type=button class="sv rm r">Remove</button><span class=ms></span>';
+row.querySelector('.em').textContent=e;row.querySelector('.eid').value=i;
+save(row,i,function(){document.getElementById('eextra').prepend(row);wire(row);document.getElementById('enew').value='';document.getElementById('enewid').value='';m.textContent=''});})
+document.getElementById('ebulkb').addEventListener('click',function(){var m=document.getElementById('ebulkm');J('/admin/emoji/bulk',{text:document.getElementById('ebulk').value}).then(function(j){m.textContent=j.ok?(j.n+' saved - reloading...'):'No valid lines found';if(j.ok)setTimeout(function(){location.reload()},800)})});
+document.querySelectorAll('.ecell').forEach(function(c){c.addEventListener('click',function(){if(!last){alert('First tap an ID box above, then tap the emoji.');return}last.value=c.dataset.c;last.focus()})})})();</script></div>
+<div class=card><h3>Test</h3>""", 1)
+
 TEMPLATES = T
+
+
+# ---- admin top menu -> left three-line (hamburger) drawer. Runs last, so every link added above is included.
+import re as _re
+_nav = T["abase.html"]
+_m = _re.search(r'<div class=nav>(.*?)</div>', _nav, _re.S)
+if _m:
+    _links = _re.findall(r'<a href="[^"]+"[^>]*>.*?</a>', _m.group(1), _re.S)
+    _main = [l for l in _links if '/admin/logout' not in l]
+    _out = [l for l in _links if '/admin/logout' in l]
+    _new = ('<style>.nav{display:none!important}'
+            '.atop{display:flex;align-items:center;gap:12px;padding:11px 16px;background:rgba(8,8,18,.75);backdrop-filter:blur(16px);border-bottom:1px solid var(--bd);position:sticky;top:0;z-index:20}'
+            '.aburger{width:46px;height:46px;border-radius:12px;border:1px solid var(--bd);background:var(--card);display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;cursor:pointer;padding:0;box-shadow:0 0 18px rgba(139,92,246,.25)}'
+            '.aburger i{display:block;width:22px;height:2.5px;border-radius:2px;background:#c4b5fd}'
+            '.aov{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(3px);opacity:0;pointer-events:none;transition:.25s;z-index:90}'
+            '.adr{position:fixed;top:0;left:0;bottom:0;width:290px;max-width:84vw;background:#07070f;border-right:1px solid rgba(139,92,246,.45);box-shadow:0 0 50px rgba(139,92,246,.3);transform:translateX(-105%);transition:.28s;z-index:100;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:6px}'
+            'body.aopen .aov{opacity:1;pointer-events:auto}body.aopen .adr{transform:none}'
+            '.adr a{display:block;padding:12px 14px;border-radius:12px;color:var(--tx);font-size:16px}.adr a:hover{background:rgba(139,92,246,.15)}'
+            '.adr a.on{background:linear-gradient(135deg,#8b5cf6,#6366f1);box-shadow:var(--gl)}'
+            '.adr .ax{align-self:flex-end;background:none;border:0;color:#fff;font-size:28px;cursor:pointer;line-height:1;padding:0 6px}'
+            '.adr .lo{margin-top:auto;border-top:1px solid var(--bd);padding-top:10px}</style>'
+            '<div class=atop><button type=button class=aburger id=aB aria-label="Menu"><i></i><i></i><i></i></button>'
+            '<b class=logo style="padding:7px 10px;display:inline-flex;align-items:center;gap:8px">{{ic(\'tool\')}} ADMIN</b></div>'
+            '<div class=aov id=aO></div><aside class=adr id=aD><button type=button class=ax id=aX aria-label="Close">&times;</button>'
+            + ''.join(_main) + ('<div class=lo>' + ''.join(_out) + '</div>' if _out else '') + '</aside>'
+            '<script>(function(){var b=document.body,o=function(v){b.classList.toggle("aopen",v)};'
+            'document.getElementById("aB").onclick=function(){o(true)};'
+            'document.getElementById("aX").onclick=document.getElementById("aO").onclick=function(){o(false)};'
+            'document.addEventListener("keydown",function(e){if(e.key==="Escape")o(false)})})();</script>')
+    T["abase.html"] = _nav[:_m.start()] + _new + _nav[_m.end():]
