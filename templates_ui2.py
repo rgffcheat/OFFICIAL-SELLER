@@ -138,7 +138,7 @@ T["rbase.html"] = HEAD + """Reseller Panel</title><style>""" + CSS2 + """</style
 <a href="/api-docs" class="{{'on' if page=='api'}}">{{ic('code')}} API &amp; Docs</a>
 <a href="/logout">{{ic('logout')}} Logout</a></div>
 <div class="top"><button class="iconbtn" id=bg aria-label="Menu">{{ic('menu',22)}}</button>
-<div class="player" id=pl><button id=pv aria-label="Previous">{{ic('prev',16)}}</button><button id=pp aria-label="Play">{{ic('play',16)}}</button><button id=nx aria-label="Next">{{ic('next',16)}}</button><span id=ttl>…</span><audio id=au preload=auto></audio></div>
+<div class="player" id=pl><button id=pv aria-label="Previous">{{ic('prev',16)}}</button><button id=pp aria-label="Play">{{ic('play',16)}}</button><button id=nx aria-label="Next">{{ic('next',16)}}</button><span id=ttl>…</span><audio id=au preload=metadata></audio><iframe id=musicframe title="Music player" allow="autoplay; encrypted-media; picture-in-picture" style="display:none;border:0;border-radius:10px;width:280px;height:158px" loading="lazy"></iframe></div>
 <button class="iconbtn" id=pal aria-label="Colour" style="margin-left:auto">{{ic('palette',22)}}</button></div>
 <div class="modal" id=mod><div class=bx><h3>{{ic('palette',20)}} Portal colour</h3><div class=mu>Your colour is saved and used on the login page too.</div>
 <div class="sw" id=sw></div><input type=color id=cc value="#3b82f6" style="width:100%;height:46px;padding:2px;border-radius:12px"><button class="o" id=mx style="margin-top:14px;width:100%">Close</button></div></div>
@@ -154,23 +154,27 @@ function pick(c){applyTheme(c);saveTheme(c);cc.value=c;const f=new FormData();f.
 cc.onchange=()=>pick(cc.value);pal.onclick=()=>mod.classList.add('open');mx.onclick=()=>mod.classList.remove('open');mod.onclick=e=>{if(e.target===mod)mod.classList.remove('open')};
 (async()=>{let L=[];try{L=await(await fetch('/music.json')).json()}catch(e){}
 if(!L.length){pl.style.display='none';return}
-const ss=sessionStorage;let i=0;
+const ss=sessionStorage,frame=document.getElementById('musicframe');let i=0,external=false;
 if(ss.mu){const k=L.findIndex(x=>x.url===ss.mu);i=k>=0?k:0}else{i=+localStorage.mi||0;if(i>=L.length)i=0}
-let leaving=false;
 function save(){try{ss.mu=L[i].url;ss.mt=au.currentTime||0;if(!au.paused)ss.ts=Date.now()}catch(e){}}
-function load(n,seek){i=(n+L.length)%L.length;au.src=L[i].url;ttl.textContent=L[i].title;localStorage.mi=i;
- return new Promise(res=>{au.addEventListener('loadedmetadata',()=>{if(seek>0){try{au.currentTime=seek}catch(e){}}res()},{once:true})})}
-function play(){return au.play().catch(()=>{pp.innerHTML=PLAY;arm()})}
-function arm(){['pointerdown','keydown','touchstart'].forEach(ev=>document.addEventListener(ev,()=>{if(au.paused&&ss.mp!=='0')play()},{once:true}))}
-au.onplay=()=>{pp.innerHTML=PAUSE;ss.mp=1};au.onpause=()=>{pp.innerHTML=PLAY;if(!au.ended&&!leaving)ss.mp=0};
-au.ontimeupdate=save;
-['pagehide','beforeunload'].forEach(ev=>addEventListener(ev,()=>{leaving=true;save()}));
-pp.onclick=()=>au.paused?play():au.pause();
-nx.onclick=async()=>{await load(i+1,0);play()};pv.onclick=async()=>{await load(i-1,0);play()};
-au.onended=async()=>{await load(i+1,0);play()};
-let t=+ss.mt||0;if(ss.mp==='1'&&ss.ts){const d=(Date.now()-ss.ts)/1000;if(d<8)t+=d}
-await load(i,t);
-if(ss.mp!=='0')play();else pp.innerHTML=PLAY;
+function stopExternal(){frame.src='';frame.style.display='none';external=false;pp.innerHTML=PLAY}
+function load(n,autoplay,seek){i=(n+L.length)%L.length;const item=L[i];ttl.textContent=item.title||'Music';ttl.title=item.title||'Music';localStorage.mi=i;stopExternal();au.pause();au.removeAttribute('src');au.style.display='';
+ if(item.kind==='youtube'||item.kind==='spotify'||item.embed_url){external=true;au.style.display='none';pp.style.display='';pp.innerHTML=PLAY;pp.onclick=()=>startExternal();if(autoplay)startExternal();return}
+ external=false;au.src=item.url;ss.mu=item.url;if(seek>0)au.addEventListener('loadedmetadata',()=>{try{au.currentTime=seek}catch(e){}},{once:true});pp.onclick=()=>au.paused?playAudio():(au.pause(),ss.mp='0');if(autoplay)playAudio();}
+function startExternal(){const item=L[i];if(!item||!item.embed_url)return;frame.style.display='block';frame.style.width='min(320px,42vw)';frame.style.height=item.kind==='youtube'?'180px':'152px';frame.allow='autoplay; encrypted-media; picture-in-picture';let src=item.embed_url;
+ if(item.kind==='youtube')src+='?autoplay=1&playsinline=1&controls=1&rel=0';else src+='?utm_source=generator&autoplay=1';
+ frame.src=src;pp.innerHTML=PAUSE;ss.mp='1';}
+function playAudio(){return au.play().catch(()=>{pp.innerHTML=PLAY})}
+au.onplay=()=>{pp.innerHTML=PAUSE;ss.mp=1};au.onpause=()=>{pp.innerHTML=PLAY};au.ontimeupdate=save;window.addEventListener('pagehide',save);
+pp.onclick=()=>external?(frame.src?(stopExternal(),ss.mp='0'):startExternal()):(au.paused?playAudio():(au.pause(),ss.mp='0'));
+nx.onclick=()=>load(i+1,true);pv.onclick=()=>load(i-1,true);au.onended=()=>load(i+1,true);
+const want=ss.mp!=='0';let resume=ss.mu?(+ss.mt||0):0;
+if(resume>0&&ss.ts&&want){const gap=(Date.now()-(+ss.ts))/1000;if(gap>0&&gap<8)resume+=gap}
+load(i,want,resume);
+if(want&&!external){const evs=['pointerdown','touchstart','keydown','click'];
+const off=()=>evs.forEach(ev=>document.removeEventListener(ev,kick,true));
+const kick=e=>{if(e&&e.target&&e.target.closest&&e.target.closest('#pl'))return;if(ss.mp==='0'||external||!au.paused){off();return}playAudio().then(()=>{if(!au.paused)off()})};
+evs.forEach(ev=>document.addEventListener(ev,kick,{capture:true,passive:true}))}
 })();
 </script></body></html>"""
 
@@ -305,7 +309,7 @@ T["admin_broadcast.html"] = r"""{% extends 'abase.html' %}{% block c %}<h2>{{ic(
 # ================================================================ v6: login verification, devices, security, telegram
 LGHEAD = HEAD + """{{BRAND}} - {{title}}</title><style>""" + CSS2 + """</style><script>""" + THEME_JS + """initTheme('');</script></head><body>
 <div class="lg"><div class="box">"""
-LGFOOT = """<div class="copy">&copy; {{year}} {{BRAND}}</div></div></div>"""
+LGFOOT = """<div class="copy">&copy; {{year}} {{BRAND}}</div></div></div><script>try{["mp","mt","mu","ts"].forEach(function(k){sessionStorage.removeItem(k)})}catch(e){}</script>"""
 
 T["login_wait.html"] = LGHEAD + """<div class="logo-t">{{ic('hourglass',30)}}</div><h1>Approval needed</h1><div class="dv"><i></i><u></u><i></i></div>
 <div class="tag">{{ic('shield2',18)}} New device</div>""" + FLASH + """
@@ -634,11 +638,11 @@ T["api.html"] = r"""{% extends 'rbase.html' %}{% block c %}<style>""" + API_CSS 
 <p class=mu>Wrong / missing token &rarr; HTTP 401 and <code>"connected": false</code>.</p></div>
 
 <div class=card><h3><span class=mth>GET</span>1. Connect</h3><p>Use this when the reseller presses <b>Connect</b> in the bot.</p>
-""" + _cb('GET {{base}}/api/v1/connect') + _cb('{"success": true, "connected": true, "message": "Connect successful",\n "username": "RPSHIVA", "balance": 250.0, "currency": "INR", "server": "{{base}}"}') + r"""
+""" + _cb('GET {{base}}/api/v1/connect') + _cb('{"success": true, "connected": true, "message": "Connect successful",\n "username": "{{BRAND}}", "balance": 250.0, "currency": "INR", "server": "{{base}}"}') + r"""
 <p class=mu>If the token is wrong: <code>{"success": false, "connected": false, "error": "INVALID_API_KEY", "message": "Not connected: ..."}</code></p></div>
 
 <div class=card><h3><span class=mth>GET</span>2. Check Balance</h3>
-""" + _cb('GET {{base}}/api/v1/balance\n\n{"success": true, "username": "RPSHIVA", "balance": 250.0, "currency": "INR"}') + r"""</div>
+""" + _cb('GET {{base}}/api/v1/balance\n\n{"success": true, "username": "{{BRAND}}", "balance": 250.0, "currency": "INR"}') + r"""</div>
 
 <div class=card><h3><span class=mth>GET</span>3. Products, Plans &amp; Prices</h3>
 <p>Prices are <b>your</b> prices (custom price if admin set one). All amounts are INR.</p>
@@ -771,6 +775,13 @@ T["admin_music.html"] = T["admin_music.html"].replace(
  '</form>\n<p class=mu>Songs play', '</form><div id=mp style="display:none;margin-top:10px"><div style="height:10px;border-radius:8px;background:rgba(255,255,255,.1);overflow:hidden"><div id=mb style="height:100%;width:0;background:linear-gradient(90deg,var(--ac),var(--ac2))"></div></div><div class=mu id=mt style="margin-top:6px">Uploading...</div></div>\n<p class=mu>Songs play', 1)
 T["admin_music.html"] = T["admin_music.html"].replace("{% endblock %}", r"""<script>
 var mf=document.getElementById('mf');
+ var mu=document.getElementById('musicurl'), mt=document.getElementById('musictitle'), lookupTimer;
+ if(mu&&mt){mu.addEventListener('change',lookupMusic);mu.addEventListener('paste',function(){setTimeout(lookupMusic,250)});
+  function lookupMusic(){var v=mu.value.trim();if(!/^https?:\/\//i.test(v))return;
+   fetch('/admin/music/metadata',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'url='+encodeURIComponent(v)})
+    .then(function(r){return r.json()}).then(function(d){if(d.ok&&d.title&&!mt.value.trim())mt.value=d.title;}).catch(function(){});
+  }
+ }
 mf.addEventListener('submit',function(e){var f=mf.querySelector('input[type=file]');if(!f.files.length||!window.XMLHttpRequest||!window.FormData)return;
  e.preventDefault();var x=new XMLHttpRequest(),box=document.getElementById('mp'),bar=document.getElementById('mb'),tx=document.getElementById('mt');
  box.style.display='block';mf.querySelectorAll('button').forEach(function(b){b.disabled=true});
@@ -831,9 +842,13 @@ if(!e||!i){m.textContent='Fill both: the emoji and its ID';return}
 var row=document.createElement('div');row.className='er';row.dataset.r=e;row.innerHTML='<span class=em></span><span class=lb>Added by you</span>&rarr;<img class=ep alt="" style="display:none"><input class=eid inputmode=numeric><button type=button class=sv>Save</button><button type=button class="sv rm r">Remove</button><span class=ms></span>';
 row.querySelector('.em').textContent=e;row.querySelector('.eid').value=i;
 save(row,i,function(){document.getElementById('eextra').prepend(row);wire(row);document.getElementById('enew').value='';document.getElementById('enewid').value='';m.textContent=''});})
-document.getElementById('ebulkb').addEventListener('click',function(){var m=document.getElementById('ebulkm');J('/admin/emoji/bulk',{text:document.getElementById('ebulk').value}).then(function(j){m.textContent=j.ok?(j.n+' saved - reloading...'):'No valid lines found';if(j.ok)setTimeout(function(){location.reload()},800)})});
+document.getElementById('ebulkb').addEventListener('click',function(){var m=document.getElementById('ebulkm');J('/admin/emoji/bulk',{text:document.getElementById('ebulk').value}).then(function(j){m.textContent=j.ok?(j.n+' saved - reloading...'):'No valid lines found';if(j.ok)setTimeout(function(){(window.rgReload?rgReload():location.reload())},800)})});
 document.querySelectorAll('.ecell').forEach(function(c){c.addEventListener('click',function(){if(!last){alert('First tap an ID box above, then tap the emoji.');return}last.value=c.dataset.c;last.focus()})})})();</script></div>
 <div class=card><h3>Test</h3>""", 1)
+
+# ---- v10.11: Bot Make (reseller) + Bots (admin)
+from templates_bots import install as _install_bots
+_install_bots(T, _P)
 
 TEMPLATES = T
 
@@ -866,3 +881,17 @@ if _m:
             'document.getElementById("aX").onclick=document.getElementById("aO").onclick=function(){o(false)};'
             'document.addEventListener("keydown",function(e){if(e.key==="Escape")o(false)})})();</script>')
     T["abase.html"] = _nav[:_m.start()] + _new + _nav[_m.end():]
+
+
+T["admin_wait.html"] = LGHEAD + """<div class="logo-t">{{ic('hourglass',30)}}</div><h1>Approval needed</h1><div class="dv"><i></i><u></u><i></i></div>
+<div class="tag">{{ic('shield2',18)}} Admin login</div>""" + FLASH + """
+<p class=mu style="text-align:center;margin:0 0 14px">Your username and password are correct. An Approve / Reject message was sent to the admin Telegram.<br>Keep this page open &mdash; you will enter automatically after Approve.</p>
+<div class="cd" id=st style="font-size:18px">Waiting for approval&hellip;</div>
+<a class="btn" href="/login/cancel" style="display:block;text-align:center;margin-top:16px;background:none;border:1px solid var(--bd);box-shadow:none">Cancel</a>
+<script>
+async function p(){try{const j=await(await fetch('/admin/wait/status',{cache:'no-store'})).json();
+ if(j.status==='approved'||j.status==='denied'||j.status==='gone'){location.href=j.next;return}
+ if(j.status==='expired'){document.getElementById('st').textContent='Request expired. Please login again.';setTimeout(()=>location.href=j.next,2500);return}}catch(e){}
+ setTimeout(p,3000)}
+p();
+</script>""" + LGFOOT + "</body></html>"
